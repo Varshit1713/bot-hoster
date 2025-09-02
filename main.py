@@ -1,14 +1,8 @@
-import discord
-from discord.ext import commands
 import os
+from discord.ext import commands
 
-intents = discord.Intents.default()
-intents.message_content = True
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=...)  # your bot code
 
-@bot.event
-async def on_ready():
-    print(f"Bot is online as {bot.user}")
-
-bot.run(os.getenv("DISCORD_TOKEN"))
+bot.run(BOT_TOKEN)
