@@ -1,1 +1,1 @@
-worker: pyhton main.py
+web: pyhton main.py
