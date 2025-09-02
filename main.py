@@ -1,31 +1,19 @@
 import os
-from discord.ext import commands
 import discord
+from discord.ext import commands
 
-# ---------- CONFIG ----------
-BOT_TOKEN = os.getenv("DISCORD_TOKEN")  # token stored in Render's Environment
-COMMAND_PREFIX = "!"
-# ----------------------------
+# Get your bot token from environment variables
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# Define intents properly
-intents = discord.Intents.default()
-intents.guilds = True
-intents.members = True
-intents.message_content = True
+# Set intents (full access)
+intents = discord.Intents.all()
 
-# Create bot
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+# Create the bot
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Example: simple ready event
+# Example ready event
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    print("Bot is ready!")
+    print(f"Logged in as {bot.user}")
 
-# Example: simple ping command
-@bot.command()
-async def ping(ctx):
-    await ctx.send("Pong!")
-
-# Run bot
 bot.run(BOT_TOKEN)
