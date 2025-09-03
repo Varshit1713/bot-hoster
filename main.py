@@ -1,17 +1,11 @@
 import os
-import discord
 from discord.ext import commands
 
-# Get your bot token from environment variables
-BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+BOT_TOKEN = os.getenv("DISCORD_TOKEN")  # pulls from Render environment
 
-# Set intents (full access)
-intents = discord.Intents.all()
-
-# Create the bot
+intents = commands.Intents.all()  # or whatever intents you want
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Example ready event
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
