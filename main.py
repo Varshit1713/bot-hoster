@@ -5,16 +5,12 @@ import json
 import os
 
 # ---------- CONFIG ----------
-# Load bot token from environment variable
-TOKEN = os.environ.get("DISCORD_TOKEN")
-DATA_FILE = "activity_logs.json"
-# Amount of time (in minutes) added per message activity
-MESSAGE_ACTIVITY_MINUTES = 5
-# Default timezone UTC offset mapping
+TOKEN = os.environ.get("DISCORD_TOKEN")  # Token from Render environment variable
+DATA_FILE = "activity_logs.json"         # File to save activity logs
+MESSAGE_ACTIVITY_MINUTES = 5             # Minutes added per message
 TIMEZONES = {
     "UTC": datetime.timezone.utc,
     "EST": datetime.timezone(datetime.timedelta(hours=-5)),
-    "EDT": datetime.timezone(datetime.timedelta(hours=-4)),
     "PST": datetime.timezone(datetime.timedelta(hours=-8)),
     "CET": datetime.timezone(datetime.timedelta(hours=1)),
 }
@@ -23,12 +19,11 @@ TIMEZONES = {
 intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
-intents.message_content = True  # required to read messages
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- LOAD/SAVE LOGS ----------
-
+# ---------- LOAD/INIT LOGS ----------
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
         raw_logs = json.load(f)
@@ -46,8 +41,7 @@ if os.path.exists(DATA_FILE):
 else:
     activity_logs = {}
 
-# Store last messages per user
-last_messages = {}
+last_messages = {}  # Stores last message per user
 
 def save_logs():
     serializable_logs = {
@@ -55,7 +49,7 @@ def save_logs():
             {
                 "start": s["start"].isoformat(),
                 "end": s["end"].isoformat() if s["end"] else None,
-                "source": s.get("source", "presence"),
+                "source": s.get("source", "presence")
             }
             for s in sessions
         ]
@@ -65,7 +59,6 @@ def save_logs():
         json.dump(serializable_logs, f, indent=4)
 
 # ---------- EVENTS ----------
-
 @bot.event
 async def on_ready():
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -79,13 +72,9 @@ async def on_ready():
 @bot.event
 async def on_presence_update(before, after):
     now = datetime.datetime.now(datetime.timezone.utc)
-
-    # User comes online
     if before.status == discord.Status.offline and after.status != discord.Status.offline:
         activity_logs.setdefault(after.id, []).append({"start": now, "end": None, "source": "presence"})
         save_logs()
-
-    # User goes offline
     elif before.status != discord.Status.offline and after.status == discord.Status.offline:
         if after.id in activity_logs and activity_logs[after.id]:
             for session in reversed(activity_logs[after.id]):
@@ -99,7 +88,7 @@ async def on_message(message):
     if message.author.bot:
         return
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Log a short "active session" for message activity
+    # Add small session for message activity
     activity_logs.setdefault(message.author.id, []).append({
         "start": now,
         "end": now + datetime.timedelta(minutes=MESSAGE_ACTIVITY_MINUTES),
@@ -109,7 +98,6 @@ async def on_message(message):
     save_logs()
 
 # ---------- HELPERS ----------
-
 def calculate_activity(user_id, since_time, until_time=None):
     total = datetime.timedelta()
     if user_id not in activity_logs:
@@ -144,7 +132,6 @@ def convert_timezone(dt: datetime.datetime, tz_name: str):
     return dt.astimezone(tz)
 
 # ---------- SLASH COMMAND ----------
-
 period_choices = [
     discord.app_commands.Choice(name="This week", value="this week"),
     discord.app_commands.Choice(name="This hour", value="this hour"),
@@ -163,7 +150,7 @@ timezone_choices = [
     username="The user to check",
     period="Timeframe",
     show_last_message="Show last message?",
-    timezone="Convert displayed time to this timezone"
+    timezone="Convert timestamp to this timezone"
 )
 @discord.app_commands.choices(period=period_choices, timezone=timezone_choices)
 async def timetrack(
@@ -175,7 +162,6 @@ async def timetrack(
 ):
     now = datetime.datetime.now(datetime.timezone.utc)
     since, until = parse_period(period, now)
-
     if since is None:
         await interaction.response.send_message(
             "❌ Invalid period selection.",
@@ -187,11 +173,14 @@ async def timetrack(
     hours, remainder = divmod(total.total_seconds(), 3600)
     minutes = remainder // 60
 
-    display_msg = f"⏳ **{username.display_name}** has {int(hours)}h {int(minutes)}m online in **{period.title()}**."
+    msg = f"⏳ **{username.display_name}** has {int(hours)}h {int(minutes)}m online in **{period.title()}**."
 
     if show_last_message and username.id in last_messages:
         last_msg = last_messages[username.id]
         ts = convert_timezone(last_msg["timestamp"], timezone)
-        display_msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
+        msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
 
-    await interaction.response.send_message(display_msg)
+    await interaction.response.send_message(msg)
+
+# ---------- RUN BOT ----------
+bot.run(TOKEN)
