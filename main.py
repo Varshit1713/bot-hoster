@@ -1,19 +1,29 @@
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 import datetime
 import json
 import os
 
 # ---------- CONFIG ----------
-# Load bot token from environment variable for safety
+# Load bot token from environment variable
 TOKEN = os.environ.get("DISCORD_TOKEN")
-DATA_FILE = "activity_logs.json"  # File to persist logs
+DATA_FILE = "activity_logs.json"
+# Amount of time (in minutes) added per message activity
+MESSAGE_ACTIVITY_MINUTES = 5
+# Default timezone UTC offset mapping
+TIMEZONES = {
+    "UTC": datetime.timezone.utc,
+    "EST": datetime.timezone(datetime.timedelta(hours=-5)),
+    "EDT": datetime.timezone(datetime.timedelta(hours=-4)),
+    "PST": datetime.timezone(datetime.timedelta(hours=-8)),
+    "CET": datetime.timezone(datetime.timedelta(hours=1)),
+}
 # -----------------------------
 
 intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
-intents.message_content = True
+intents.message_content = True  # required to read messages
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -22,11 +32,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
         raw_logs = json.load(f)
-        # Convert timestamps back to datetime objects
         activity_logs = {
             int(user_id): [
-                {"start": datetime.datetime.fromisoformat(s["start"]),
-                 "end": datetime.datetime.fromisoformat(s["end"]) if s["end"] else None}
+                {
+                    "start": datetime.datetime.fromisoformat(s["start"]),
+                    "end": datetime.datetime.fromisoformat(s["end"]) if s["end"] else None,
+                    "source": s.get("source", "presence"),
+                }
                 for s in sessions
             ]
             for user_id, sessions in raw_logs.items()
@@ -34,10 +46,17 @@ if os.path.exists(DATA_FILE):
 else:
     activity_logs = {}
 
+# Store last messages per user
+last_messages = {}
+
 def save_logs():
     serializable_logs = {
         str(user_id): [
-            {"start": s["start"].isoformat(), "end": s["end"].isoformat() if s["end"] else None}
+            {
+                "start": s["start"].isoformat(),
+                "end": s["end"].isoformat() if s["end"] else None,
+                "source": s.get("source", "presence"),
+            }
             for s in sessions
         ]
         for user_id, sessions in activity_logs.items()
@@ -50,11 +69,10 @@ def save_logs():
 @bot.event
 async def on_ready():
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Track members currently online at startup
     for guild in bot.guilds:
         for member in guild.members:
             if member.status != discord.Status.offline:
-                activity_logs.setdefault(member.id, []).append({"start": now, "end": None})
+                activity_logs.setdefault(member.id, []).append({"start": now, "end": None, "source": "presence"})
     await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
 
@@ -64,7 +82,7 @@ async def on_presence_update(before, after):
 
     # User comes online
     if before.status == discord.Status.offline and after.status != discord.Status.offline:
-        activity_logs.setdefault(after.id, []).append({"start": now, "end": None})
+        activity_logs.setdefault(after.id, []).append({"start": now, "end": None, "source": "presence"})
         save_logs()
 
     # User goes offline
@@ -76,15 +94,27 @@ async def on_presence_update(before, after):
                     save_logs()
                     break
 
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Log a short "active session" for message activity
+    activity_logs.setdefault(message.author.id, []).append({
+        "start": now,
+        "end": now + datetime.timedelta(minutes=MESSAGE_ACTIVITY_MINUTES),
+        "source": "message"
+    })
+    last_messages[message.author.id] = {"content": message.content, "timestamp": now}
+    save_logs()
+
 # ---------- HELPERS ----------
 
 def calculate_activity(user_id, since_time, until_time=None):
     total = datetime.timedelta()
     if user_id not in activity_logs:
         return total
-
     until_time = until_time or datetime.datetime.now(datetime.timezone.utc)
-
     for session in activity_logs[user_id]:
         start = session["start"]
         end = session["end"] or datetime.datetime.now(datetime.timezone.utc)
@@ -109,6 +139,10 @@ def parse_period(period: str, now: datetime.datetime):
     else:
         return None, None
 
+def convert_timezone(dt: datetime.datetime, tz_name: str):
+    tz = TIMEZONES.get(tz_name.upper(), datetime.timezone.utc)
+    return dt.astimezone(tz)
+
 # ---------- SLASH COMMAND ----------
 
 period_choices = [
@@ -120,16 +154,24 @@ period_choices = [
     discord.app_commands.Choice(name="Last month", value="last month"),
 ]
 
+timezone_choices = [
+    discord.app_commands.Choice(name=tz, value=tz) for tz in TIMEZONES.keys()
+]
+
 @bot.tree.command(name="timetrack", description="Check a user's tracked online time")
 @discord.app_commands.describe(
     username="The user to check",
-    period="Timeframe"
+    period="Timeframe",
+    show_last_message="Show last message?",
+    timezone="Convert displayed time to this timezone"
 )
-@discord.app_commands.choices(period=period_choices)
+@discord.app_commands.choices(period=period_choices, timezone=timezone_choices)
 async def timetrack(
     interaction: discord.Interaction,
     username: discord.Member,
-    period: str = "this week"
+    period: str = "this week",
+    show_last_message: bool = False,
+    timezone: str = "UTC"
 ):
     now = datetime.datetime.now(datetime.timezone.utc)
     since, until = parse_period(period, now)
@@ -144,11 +186,12 @@ async def timetrack(
     total = calculate_activity(username.id, since, until)
     hours, remainder = divmod(total.total_seconds(), 3600)
     minutes = remainder // 60
-    display_period = period.title()
 
-    await interaction.response.send_message(
-        f"⏳ **{username.display_name}** has {int(hours)}h {int(minutes)}m online in **{display_period}**."
-    )
+    display_msg = f"⏳ **{username.display_name}** has {int(hours)}h {int(minutes)}m online in **{period.title()}**."
 
-# ---------- RUN BOT ----------
-bot.run(TOKEN)
+    if show_last_message and username.id in last_messages:
+        last_msg = last_messages[username.id]
+        ts = convert_timezone(last_msg["timestamp"], timezone)
+        display_msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
+
+    await interaction.response.send_message(display_msg)
