@@ -178,7 +178,7 @@ async def timetrack(
     if show_last_message and username.id in last_messages:
         last_msg = last_messages[username.id]
         ts = convert_timezone(last_msg["timestamp"], timezone)
-        msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
+        msg += f"\n\n💬 Last message:\n{last_msg['content']}\n\n🕒 Timezone:\n{timezone.upper()}"
 
     await interaction.response.send_message(msg)
 
