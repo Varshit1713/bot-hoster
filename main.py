@@ -58,10 +58,7 @@ if os.path.exists(DATA_FILE):
                     "monthly_seconds": data.get("monthly_seconds", 0),
                     "last_activity": datetime.datetime.fromisoformat(data["last_activity"]) if data.get("last_activity") else None,
                     "online": data.get("online", False),
-                    "last_message": datetime.datetime.fromisoformat(data["last_message"]) if data.get("last_message") else None,
-                    "last_daily_reset": datetime.datetime.fromisoformat(data["last_daily_reset"]) if data.get("last_daily_reset") else None,
-                    "last_weekly_reset": datetime.datetime.fromisoformat(data["last_weekly_reset"]) if data.get("last_weekly_reset") else None,
-                    "last_monthly_reset": datetime.datetime.fromisoformat(data["last_monthly_reset"]) if data.get("last_monthly_reset") else None,
+                    "last_message": datetime.datetime.fromisoformat(data["last_message"]) if data.get("last_message") else None
                 }
     except Exception:
         print("⚠️ Corrupt activity_logs.json, resetting...")
@@ -79,10 +76,7 @@ def save_logs():
             "monthly_seconds": data.get("monthly_seconds", 0),
             "last_activity": data["last_activity"].isoformat() if data["last_activity"] else None,
             "online": data["online"],
-            "last_message": data["last_message"].isoformat() if data.get("last_message") else None,
-            "last_daily_reset": data.get("last_daily_reset").isoformat() if data.get("last_daily_reset") else None,
-            "last_weekly_reset": data.get("last_weekly_reset").isoformat() if data.get("last_weekly_reset") else None,
-            "last_monthly_reset": data.get("last_monthly_reset").isoformat() if data.get("last_monthly_reset") else None,
+            "last_message": data["last_message"].isoformat() if data.get("last_message") else None
         }
     with open(DATA_FILE, "w") as f:
         json.dump(serializable_logs, f, indent=4)
@@ -112,26 +106,36 @@ def update_user_time(user_id: int):
 
 def check_inactivity():
     now = datetime.datetime.now(datetime.timezone.utc)
-    for user in activity_logs.values():
-        if user["online"] and user.get("last_message"):
+    for user_id, user in activity_logs.items():
+        if user["online"] and user["last_message"]:
             if (now - user["last_message"]).total_seconds() > INACTIVITY_THRESHOLD:
                 user["online"] = False
 
 def reset_periods():
     now = datetime.datetime.now(datetime.timezone.utc)
     for user in activity_logs.values():
-        # Daily reset
-        if not user.get("last_daily_reset") or (now - user.get("last_daily_reset")).days >= 1:
+        # Daily reset at midnight UTC
+        if user.get("last_daily_reset") is None or (now - user.get("last_daily_reset")).days >= 1:
             user["daily_seconds"] = 0
             user["last_daily_reset"] = now
-        # Weekly reset
-        if not user.get("last_weekly_reset") or (now - user.get("last_weekly_reset")).days >= 7:
+        # Weekly reset on Mondays
+        if user.get("last_weekly_reset") is None or (now - user.get("last_weekly_reset")).days >= 7:
             user["weekly_seconds"] = 0
             user["last_weekly_reset"] = now
-        # Monthly reset
-        if not user.get("last_monthly_reset") or now.month != user.get("last_monthly_reset").month:
+        # Monthly reset on the 1st
+        if user.get("last_monthly_reset") is None or now.month != user.get("last_monthly_reset").month:
             user["monthly_seconds"] = 0
             user["last_monthly_reset"] = now
+
+# ------------------ BACKGROUND TASK ------------------
+@tasks.loop(seconds=10)
+async def update_all_users():
+    check_inactivity()
+    reset_periods()
+    for user_id, user in activity_logs.items():
+        if user["online"]:
+            update_user_time(user_id)
+    save_logs()
 
 # ------------------ EVENTS ------------------
 @bot.event
@@ -151,36 +155,19 @@ async def on_message(message):
         return
     user_id = message.author.id
     now = datetime.datetime.now(datetime.timezone.utc)
-
-    # Initialize user if not exist
     if user_id not in activity_logs:
         activity_logs[user_id] = {
             "total_seconds": 0,
             "daily_seconds": 0,
             "weekly_seconds": 0,
             "monthly_seconds": 0,
-            "last_activity": now,
+            "last_activity": None,
             "online": True,
-            "last_message": now,
-            "last_daily_reset": now,
-            "last_weekly_reset": now,
-            "last_monthly_reset": now,
+            "last_message": now
         }
     else:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_message"] = now
-
-    save_logs()
-    await bot.process_commands(message)
-
-# ------------------ BACKGROUND TASK ------------------
-@tasks.loop(seconds=10)
-async def update_all_users():
-    check_inactivity()
-    reset_periods()
-    for user_id, user in activity_logs.items():
-        if user["online"]:
-            update_user_time(user_id)
     save_logs()
 
 # ------------------ SLASH COMMAND ------------------
@@ -198,7 +185,6 @@ async def timetrack(
 
     user = activity_logs[user_id]
     update_user_time(user_id)
-
     online_time = user["total_seconds"]
     daily_time = user["daily_seconds"]
     weekly_time = user["weekly_seconds"]
@@ -219,6 +205,3 @@ async def timetrack(
         msg += f"💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}]"
 
     await interaction.response.send_message(msg)
-
-# ------------------ RUN BOT ------------------
-bot.run(TOKEN)
