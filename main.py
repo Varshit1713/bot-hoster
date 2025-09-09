@@ -12,13 +12,13 @@ if not TOKEN:
     sys.exit(1)
 
 DATA_FILE = "activity_logs.json"  # File to save activity logs
+ACTIVITY_TIMEOUT = 300  # 5 minutes of inactivity counts as offline
 TIMEZONES = {
     "UTC": datetime.timezone.utc,
     "EST": datetime.timezone(datetime.timedelta(hours=-5)),
     "PST": datetime.timezone(datetime.timedelta(hours=-8)),
     "CET": datetime.timezone(datetime.timedelta(hours=1)),
 }
-# -----------------------------
 
 intents = discord.Intents.default()
 intents.members = True
@@ -72,19 +72,27 @@ def convert_timezone(dt: datetime.datetime, tz_name: str):
     return dt.astimezone(tz)
 
 def update_user_time(user_id: int):
+    """Update cumulative time for a user based on last activity and timeout."""
     now = datetime.datetime.now(datetime.timezone.utc)
     user_data = activity_logs.get(user_id)
-    if not user_data or not user_data["online"] or not user_data["last_activity"]:
+    if not user_data or not user_data.get("last_activity"):
         return
+
     elapsed = (now - user_data["last_activity"]).total_seconds()
-    if elapsed > 0:
-        user_data["total_seconds"] += int(elapsed)
-        user_data["last_activity"] = now
+    if user_data.get("online", False):
+        if elapsed <= ACTIVITY_TIMEOUT:
+            user_data["total_seconds"] += int(elapsed)
+        else:
+            # Inactivity timeout reached → offline
+            user_data["online"] = False
+    # Always update last_activity timestamp
+    user_data["last_activity"] = now
 
 # ---------- EVENTS ----------
 @bot.event
 async def on_ready():
     now = datetime.datetime.now(datetime.timezone.utc)
+    # Initialize online members
     for guild in bot.guilds:
         for member in guild.members:
             if member.status != discord.Status.offline:
@@ -113,13 +121,10 @@ async def on_presence_update(before, after):
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
 
-    if before.status == discord.Status.offline and after.status != discord.Status.offline:
+    # Presence updates just refresh activity
+    if after.status != discord.Status.offline:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_activity"] = now
-    elif before.status != discord.Status.offline and after.status == discord.Status.offline:
-        update_user_time(user_id)
-        activity_logs[user_id]["online"] = False
-        activity_logs[user_id]["last_activity"] = None
 
     save_logs()
 
@@ -127,25 +132,24 @@ async def on_presence_update(before, after):
 async def on_message(message):
     if message.author.bot:
         return
+
     now = datetime.datetime.now(datetime.timezone.utc)
     user_id = message.author.id
+
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
-    if not activity_logs[user_id]["online"]:
-        activity_logs[user_id]["online"] = True
-        activity_logs[user_id]["last_activity"] = now
-    else:
-        update_user_time(user_id)
 
+    # Message = activity
+    activity_logs[user_id]["online"] = True
+    activity_logs[user_id]["last_activity"] = now
     last_messages[user_id] = {"content": message.content, "timestamp": now}
     save_logs()
 
 # ---------- BACKGROUND TASK ----------
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=10)
 async def update_all_users():
     for user_id, data in activity_logs.items():
-        if data["online"]:
-            update_user_time(user_id)
+        update_user_time(user_id)
     save_logs()
 
 # ---------- SLASH COMMAND ----------
@@ -162,6 +166,7 @@ async def timetrack(
         await interaction.response.send_message("❌ No activity recorded for this user.", ephemeral=True)
         return
 
+    update_user_time(user_id)
     total_seconds = activity_logs[user_id]["total_seconds"]
     status = "🟢 Online" if activity_logs[user_id]["online"] else "⚫ Offline"
 
