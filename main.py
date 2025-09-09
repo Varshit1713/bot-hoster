@@ -110,7 +110,7 @@ def calculate_activity(user_id, since_time, until_time=None):
     until_time = until_time or datetime.datetime.now(datetime.timezone.utc)
     for session in activity_logs[user_id]:
         start = session["start"]
-        end = session["end"] or datetime.datetime.now(datetime.timezone.utc)
+        end = session["end"] or until_time  # ongoing sessions counted up to now
         if end >= since_time and start <= until_time:
             total += min(end, until_time) - max(start, since_time)
     return total
@@ -175,10 +175,12 @@ async def timetrack(
         return
 
     total = calculate_activity(username.id, since, until)
-    hours, remainder = divmod(total.total_seconds(), 3600)
-    minutes = remainder // 60
+    seconds_total = int(total.total_seconds())
+    hours = seconds_total // 3600
+    minutes = (seconds_total % 3600) // 60
+    seconds = seconds_total % 60
 
-    msg = f"⏳ **{username.display_name}** has {int(hours)}h {int(minutes)}m online in **{period.title()}**."
+    msg = f"⏳ **{username.display_name}** has {hours}h {minutes}m {seconds}s online in **{period.title()}**."
 
     if show_last_message and username.id in last_messages:
         last_msg = last_messages[username.id]
