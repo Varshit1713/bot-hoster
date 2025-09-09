@@ -137,8 +137,7 @@ class TimeTrack(commands.Cog):
             self.activity_logs[user_id]["last_message"] = now
         self.save_logs()
 
-    # ------------------ SLASH COMMAND ------------------
-    @commands.Cog.listener()
+    # ------------------ COMMAND ------------------
     @commands.hybrid_command(name="timetrack", description="Check a user's tracked online/offline time")
     async def timetrack(self, ctx, username: discord.Member, show_last_message: bool = False, timezone: str = "UTC"):
         user_id = username.id
