@@ -5,7 +5,7 @@ import datetime
 
 MUTE_ROLE_ID = 1410423854563721287
 LOG_CHANNEL_ID = 1403422664521023648
-GUILD_ID = 123456789012345678  # Replace with your guild ID
+GUILD_ID = 1403359962369097739  # Replace with your guild ID
 
 class MuteCog(commands.Cog):
     def __init__(self, bot):
