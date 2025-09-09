@@ -12,13 +12,13 @@ if not TOKEN:
     sys.exit(1)
 
 DATA_FILE = "activity_logs.json"  # File to save activity logs
-ACTIVITY_TIMEOUT = 300  # 5 minutes of inactivity counts as offline
 TIMEZONES = {
     "UTC": datetime.timezone.utc,
     "EST": datetime.timezone(datetime.timedelta(hours=-5)),
     "PST": datetime.timezone(datetime.timedelta(hours=-8)),
     "CET": datetime.timezone(datetime.timedelta(hours=1)),
 }
+# -----------------------------
 
 intents = discord.Intents.default()
 intents.members = True
@@ -35,8 +35,8 @@ if os.path.exists(DATA_FILE):
             activity_logs = {
                 int(user_id): {
                     "total_seconds": data.get("total_seconds", 0),
-                    "last_activity": datetime.datetime.fromisoformat(data["last_activity"])
-                    if data.get("last_activity") else None,
+                    "last_activity": datetime.datetime.fromisoformat(data["last_activity"]) 
+                                     if data.get("last_activity") else None,
                     "online": data.get("online", False)
                 }
                 for user_id, data in raw_logs.items()
@@ -72,35 +72,40 @@ def convert_timezone(dt: datetime.datetime, tz_name: str):
     return dt.astimezone(tz)
 
 def update_user_time(user_id: int):
-    """Update cumulative time for a user based on last activity and timeout."""
+    """Update cumulative time for an online user."""
     now = datetime.datetime.now(datetime.timezone.utc)
     user_data = activity_logs.get(user_id)
-    if not user_data or not user_data.get("last_activity"):
+    if not user_data or not user_data["online"] or not user_data["last_activity"]:
         return
-
     elapsed = (now - user_data["last_activity"]).total_seconds()
-    if user_data.get("online", False):
-        if elapsed <= ACTIVITY_TIMEOUT:
-            user_data["total_seconds"] += int(elapsed)
-        else:
-            # Inactivity timeout reached → offline
-            user_data["online"] = False
-    # Always update last_activity timestamp
-    user_data["last_activity"] = now
+    if elapsed > 0:
+        user_data["total_seconds"] += int(elapsed)
+        user_data["last_activity"] = now
+        save_logs()
 
 # ---------- EVENTS ----------
 @bot.event
 async def on_ready():
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Initialize online members
+
+    # Fix for users who were online while bot was offline
+    for user_id, data in activity_logs.items():
+        if data["online"] and data["last_activity"]:
+            elapsed = (now - data["last_activity"]).total_seconds()
+            if elapsed > 0:
+                data["total_seconds"] += int(elapsed)
+                data["last_activity"] = now
+
+    # Track members currently online
     for guild in bot.guilds:
         for member in guild.members:
             if member.status != discord.Status.offline:
-                activity_logs[member.id] = {
-                    "total_seconds": activity_logs.get(member.id, {}).get("total_seconds", 0),
-                    "last_activity": now,
-                    "online": True
-                }
+                if member.id not in activity_logs:
+                    activity_logs[member.id] = {"total_seconds": 0, "last_activity": now, "online": True}
+                else:
+                    activity_logs[member.id]["online"] = True
+                    activity_logs[member.id]["last_activity"] = now
+
     save_logs()
 
     if not update_all_users.is_running():
@@ -121,10 +126,15 @@ async def on_presence_update(before, after):
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
 
-    # Presence updates just refresh activity
-    if after.status != discord.Status.offline:
+    # User comes online
+    if before.status == discord.Status.offline and after.status != discord.Status.offline:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_activity"] = now
+    # User goes offline
+    elif before.status != discord.Status.offline and after.status == discord.Status.offline:
+        update_user_time(user_id)
+        activity_logs[user_id]["online"] = False
+        activity_logs[user_id]["last_activity"] = None
 
     save_logs()
 
@@ -132,24 +142,27 @@ async def on_presence_update(before, after):
 async def on_message(message):
     if message.author.bot:
         return
-
     now = datetime.datetime.now(datetime.timezone.utc)
     user_id = message.author.id
-
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
 
-    # Message = activity
-    activity_logs[user_id]["online"] = True
-    activity_logs[user_id]["last_activity"] = now
+    # Treat sending a message as being "active"
+    if not activity_logs[user_id]["online"]:
+        activity_logs[user_id]["online"] = True
+        activity_logs[user_id]["last_activity"] = now
+    else:
+        update_user_time(user_id)
+
     last_messages[user_id] = {"content": message.content, "timestamp": now}
     save_logs()
 
 # ---------- BACKGROUND TASK ----------
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=60)
 async def update_all_users():
     for user_id, data in activity_logs.items():
-        update_user_time(user_id)
+        if data["online"]:
+            update_user_time(user_id)
     save_logs()
 
 # ---------- SLASH COMMAND ----------
@@ -157,7 +170,6 @@ async def update_all_users():
 async def timetrack(
     interaction: discord.Interaction,
     username: discord.Member,
-    period: str = "all time",
     show_last_message: bool = False,
     timezone: str = "UTC"
 ):
@@ -170,7 +182,7 @@ async def timetrack(
     total_seconds = activity_logs[user_id]["total_seconds"]
     status = "🟢 Online" if activity_logs[user_id]["online"] else "⚫ Offline"
 
-    msg = f"⏳ **{username.display_name}** has {format_time(total_seconds)} online in **{period.title()}**.\n"
+    msg = f"⏳ **{username.display_name}** has {format_time(total_seconds)} online.\n"
     msg += f"**Status:** {status}"
 
     if show_last_message and user_id in last_messages:
