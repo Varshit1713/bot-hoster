@@ -43,7 +43,9 @@ class MuteCog(commands.Cog):
 
         # DM user
         try:
-            await member.send(f"You have been muted in {member.guild.name} until {end_time} UTC.\nReason: {reason}\nProof: {proof if proof else 'None'}")
+            await member.send(
+                f"You have been muted in {member.guild.name} until {end_time} UTC.\nReason: {reason}\nProof: {proof if proof else 'None'}"
+            )
         except:
             pass
 
@@ -111,26 +113,36 @@ class MuteCog(commands.Cog):
         await ctx.send(f"✅ {member.mention} has been muted.", delete_after=5)
 
     @commands.hybrid_command(name="rmute", description="Mute a user by replying to a message")
+    @commands.has_permissions(mute_members=True)
     async def rmute(self, interaction: discord.Interaction, duration: str = None, reason: str = "No reason provided"):
-        if not interaction.user.guild_permissions.mute_members:
-            await interaction.response.send_message("❌ You do not have permission to mute members.", ephemeral=True)
-            return
-
-        if not interaction.data.get("resolved", {}).get("messages"):
+        """Mute a user via slash/hybrid command by replying to their message"""
+        # Resolve the replied message
+        resolved = interaction.data.get("resolved", {}).get("messages", {})
+        if not resolved:
             await interaction.response.send_message("❌ You must reply to a message.", ephemeral=True)
             return
 
-        refs = interaction.data["resolved"]["messages"]
-        message_id = list(refs.keys())[0]
-        channel_id = int(refs[message_id]["channel_id"])
+        message_id = list(resolved.keys())[0]
+        message_data = resolved[message_id]
+        channel_id = int(message_data["channel_id"])
         channel = self.bot.get_channel(channel_id)
-        message = await channel.fetch_message(int(message_id))
-        member = message.author
+        if not channel:
+            await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+            return
 
+        try:
+            message = await channel.fetch_message(int(message_id))
+        except:
+            await interaction.response.send_message("❌ Message not found.", ephemeral=True)
+            return
+
+        member = message.author
         dur_seconds = self.parse_duration(duration)
         proof = f"[Message link](https://discord.com/channels/{interaction.guild.id}/{channel.id}/{message.id})"
         await self.apply_mute(member, dur_seconds, reason, proof)
+
         await interaction.response.send_message(f"✅ {member.mention} has been muted.", ephemeral=True)
 
+# ------------------ Setup ------------------
 async def setup(bot):
     await bot.add_cog(MuteCog(bot))
