@@ -223,8 +223,7 @@ def format_datetime(dt: datetime.datetime):
 
 # Function to unmute user after duration
 async def unmute_user(user_id):
-    guilds = bot.guilds
-    for guild in guilds:
+    for guild in bot.guilds:
         member = guild.get_member(user_id)
         if member and MUTE_ROLE_ID in [role.id for role in member.roles]:
             role = guild.get_role(MUTE_ROLE_ID)
@@ -247,69 +246,62 @@ async def check_mutes():
 check_mutes.start()
 
 # ------------------ TRIGGER-BASED MUTE ------------------
-@bot.event
-async def on_message(message):
-    if message.author.bot:
+async def handle_qmute(message):
+    if not message.content.startswith("!qmute"):
         return
 
-    # Check for !qmute trigger
-    if message.content.startswith("!qmute"):
-        if not message.author.guild_permissions.mute_members:
-            await message.channel.send("❌ You don't have permission to mute members.")
-            return
-
-        if not message.reference:
-            await message.channel.send("❌ You must reply to a user's message to mute them.")
-            return
-
-        target_message = await message.channel.fetch_message(message.reference.message_id)
-        target_member = target_message.author
-
-        parts = message.content.split(" ", 2)  # !qmute duration reason
-        if len(parts) < 2:
-            await message.channel.send("❌ Usage: !qmute [duration in minutes] [reason]")
-            return
-
-        try:
-            duration_minutes = int(parts[1])
-        except ValueError:
-            await message.channel.send("❌ Duration must be a number (minutes).")
-            return
-
-        reason = parts[2] if len(parts) > 2 else "No reason provided"
-        end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=duration_minutes)
-
-        role = message.guild.get_role(MUTE_ROLE_ID)
-        await target_member.add_roles(role, reason=reason)
-
-        # Save mute info
-        active_mutes[target_member.id] = {
-            "end_time": end_time,
-            "reason": reason,
-            "proof": f"Reply to: {message.content}"
-        }
-
-        # Log to mute channel
-        log_channel = message.guild.get_channel(MUTE_LOG_CHANNEL)
-        if log_channel:
-            await log_channel.send(
-                f"🔇 **Mute Applied**\n"
-                f"**User:** {target_member.mention}\n"
-                f"**Duration:** {duration_minutes} minutes (until {format_datetime(end_time)})\n"
-                f"**Reason:** {reason}\n"
-                f"**Proof:** Reply to `{message.content}`\n"
-                f"**Moderator:** {message.author.mention}"
-            )
-
-        await message.delete()
-        try:
-            await target_member.send(f"🔇 You have been muted in **{message.guild.name}** for {duration_minutes} minutes. Reason: {reason}")
-        except:
-            pass
+    if not message.author.guild_permissions.mute_members:
+        await message.channel.send("❌ You don't have permission to mute members.")
         return
 
-    # Keep your original on_message processing for time track
-    await bot.process_commands(message)
+    if not message.reference:
+        await message.channel.send("❌ You must reply to a user's message to mute them.")
+        return
+
+    target_message = await message.channel.fetch_message(message.reference.message_id)
+    target_member = target_message.author
+
+    parts = message.content.split(" ", 2)  # !qmute duration reason
+    if len(parts) < 2:
+        await message.channel.send("❌ Usage: !qmute [duration in minutes] [reason]")
+        return
+
+    try:
+        duration_minutes = int(parts[1])
+    except ValueError:
+        await message.channel.send("❌ Duration must be a number (minutes).")
+        return
+
+    reason = parts[2] if len(parts) > 2 else "No reason provided"
+    end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=duration_minutes)
+
+    role = message.guild.get_role(MUTE_ROLE_ID)
+    await target_member.add_roles(role, reason=reason)
+
+    # Save mute info
+    active_mutes[target_member.id] = {
+        "end_time": end_time,
+        "reason": reason,
+        "proof": f"Reply to: {message.content}"
+    }
+
+    # Log to mute channel
+    log_channel = message.guild.get_channel(MUTE_LOG_CHANNEL)
+    if log_channel:
+        await log_channel.send(
+            f"🔇 **Mute Applied**\n"
+            f"**User:** {target_member.mention}\n"
+            f"**Duration:** {duration_minutes} minutes (until {format_datetime(end_time)})\n"
+            f"**Reason:** {reason}\n"
+            f"**Proof:** Reply to `{message.content}`\n"
+            f"**Moderator:** {message.author.mention}"
+        )
+
+    await message.delete()
+    try:
+        await target_member.send(f"🔇 You have been muted in **{message.guild.name}** for {duration_minutes} minutes. Reason: {reason}")
+    except:
+        pass
 
 # ------------------ SLASH COMMAND MUTE ------------------
 @bot.tree.command(name="rmute", description="Mute a user")
