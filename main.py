@@ -170,13 +170,10 @@ async def timetrack(
     timezone: str = "UTC"
 ):
     user_id = username.id
-    now = datetime.datetime.now(datetime.timezone.utc)
 
     if user_id not in activity_logs:
         await interaction.response.send_message("❌ No activity recorded for this user.", ephemeral=True)
         return
-
-    update_user_time(user_id)  # refresh their time
 
     total_seconds = activity_logs[user_id]["total_seconds"]
     status = "🟢 Online" if activity_logs[user_id]["online"] else "⚫ Offline"
