@@ -65,7 +65,10 @@ async def on_ready():
     for guild in bot.guilds:
         for member in guild.members:
             if member.status != discord.Status.offline:
-                activity_logs.setdefault(member.id, []).append({"start": now, "end": None, "source": "presence"})
+                sessions = activity_logs.setdefault(member.id, [])
+                # Only add new session if no open session exists
+                if not sessions or sessions[-1]["end"] is not None:
+                    sessions.append({"start": now, "end": None, "source": "presence"})
     await bot.tree.sync()
     print(f"✅ Logged in as {bot.user}")
 
@@ -73,8 +76,10 @@ async def on_ready():
 async def on_presence_update(before, after):
     now = datetime.datetime.now(datetime.timezone.utc)
     if before.status == discord.Status.offline and after.status != discord.Status.offline:
-        activity_logs.setdefault(after.id, []).append({"start": now, "end": None, "source": "presence"})
-        save_logs()
+        sessions = activity_logs.setdefault(after.id, [])
+        if not sessions or sessions[-1]["end"] is not None:
+            sessions.append({"start": now, "end": None, "source": "presence"})
+            save_logs()
     elif before.status != discord.Status.offline and after.status == discord.Status.offline:
         if after.id in activity_logs and activity_logs[after.id]:
             for session in reversed(activity_logs[after.id]):
@@ -178,7 +183,7 @@ async def timetrack(
     if show_last_message and username.id in last_messages:
         last_msg = last_messages[username.id]
         ts = convert_timezone(last_msg["timestamp"], timezone)
-        msg += f"\n\n💬 Last message:\n{last_msg['content']}\n\n🕒 Timezone:\n{timezone.upper()}"
+        msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
 
     await interaction.response.send_message(msg)
 
