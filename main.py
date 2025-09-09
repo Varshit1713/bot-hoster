@@ -137,7 +137,7 @@ async def update_all_users():
             update_user_time(user_id)
     save_logs()
 
-# ------------------ SLASH COMMAND ------------------
+# ------------------ SLASH COMMAND: TIMETRACK ------------------
 @bot.tree.command(name="timetrack", description="Check a user's tracked online/offline time")
 async def timetrack(
     interaction: discord.Interaction,
@@ -176,15 +176,11 @@ async def timetrack(
 # ------------------ MUTE SYSTEM ------------------
 MUTE_ROLE_ID = 1410423854563721287  # Role to add when muted
 MUTE_LOG_CHANNEL = 1403422664521023648  # Channel to log mutes
+active_mutes = {}  # {user_id: {"end_time": datetime, "reason": str, "proof": str}}
 
-# Store active mutes: {user_id: {"end_time": datetime, "reason": str, "proof": str}}
-active_mutes = {}
-
-# Helper function to format datetime
 def format_datetime(dt: datetime.datetime):
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-# Function to unmute user after duration
 async def unmute_user(user_id):
     for guild in bot.guilds:
         member = guild.get_member(user_id)
@@ -198,7 +194,6 @@ async def unmute_user(user_id):
     if user_id in active_mutes:
         del active_mutes[user_id]
 
-# Background task to check mutes
 @tasks.loop(seconds=10)
 async def check_mutes():
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -208,13 +203,13 @@ async def check_mutes():
 
 check_mutes.start()
 
-# ------------------ TRIGGER-BASED MUTE ------------------
+# ------------------ EVENT: ON_MESSAGE ------------------
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
-    # ---------- Time track processing ----------
+    # ---------- Time track ----------
     user_id = message.author.id
     now = datetime.datetime.now(datetime.timezone.utc)
     if user_id not in activity_logs:
@@ -231,9 +226,9 @@ async def on_message(message):
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_message"] = now
     save_logs()
-    # ---------- End time track processing ----------
+    # ---------- End time track ----------
 
-    # Check for !qmute trigger
+    # ---------- Trigger-based mute (!qmute) ----------
     if message.content.startswith("!qmute"):
         if not message.author.guild_permissions.mute_members:
             await message.channel.send("❌ You don't have permission to mute members.")
@@ -246,7 +241,7 @@ async def on_message(message):
         target_message = await message.channel.fetch_message(message.reference.message_id)
         target_member = target_message.author
 
-        parts = message.content.split(" ", 2)  # !qmute duration reason
+        parts = message.content.split(" ", 2)
         if len(parts) < 2:
             await message.channel.send("❌ Usage: !qmute [duration in minutes] [reason]")
             return
@@ -259,18 +254,15 @@ async def on_message(message):
 
         reason = parts[2] if len(parts) > 2 else "No reason provided"
         end_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=duration_minutes)
-
         role = message.guild.get_role(MUTE_ROLE_ID)
         await target_member.add_roles(role, reason=reason)
 
-        # Save mute info
         active_mutes[target_member.id] = {
             "end_time": end_time,
             "reason": reason,
             "proof": f"Reply to: {message.content}"
         }
 
-        # Log to mute channel
         log_channel = message.guild.get_channel(MUTE_LOG_CHANNEL)
         if log_channel:
             await log_channel.send(
@@ -289,6 +281,8 @@ async def on_message(message):
             pass
         return
 
+    await bot.process_commands(message)  # Ensure slash commands work
+
 # ------------------ SLASH COMMAND MUTE ------------------
 @bot.tree.command(name="rmute", description="Mute a user")
 @discord.app_commands.describe(user="The user to mute", duration="Duration in minutes", reason="Reason for mute")
@@ -301,14 +295,8 @@ async def rmute(interaction: discord.Interaction, user: discord.Member, duration
     role = interaction.guild.get_role(MUTE_ROLE_ID)
     await user.add_roles(role, reason=reason)
 
-    # Save mute info
-    active_mutes[user.id] = {
-        "end_time": end_time,
-        "reason": reason,
-        "proof": None
-    }
+    active_mutes[user.id] = {"end_time": end_time, "reason": reason, "proof": None}
 
-    # Log to mute channel
     log_channel = interaction.guild.get_channel(MUTE_LOG_CHANNEL)
     if log_channel:
         await log_channel.send(
@@ -325,3 +313,15 @@ async def rmute(interaction: discord.Interaction, user: discord.Member, duration
         pass
 
     await interaction.response.send_message(f"✅ {user.mention} has been muted for {duration} minutes.", ephemeral=True)
+
+# ------------------ ON_READY ------------------
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    if not update_all_users.is_running():
+        update_all_users.start()
+    try:
+        await bot.tree.sync()
+        print("✅ Slash commands synced.")
+    except Exception as e:
+        print(f"⚠️ Slash sync failed: {e}")
