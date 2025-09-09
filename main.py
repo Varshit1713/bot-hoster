@@ -3,10 +3,15 @@ from discord.ext import commands, tasks
 import datetime
 import json
 import os
+import sys
 
 # ---------- CONFIG ----------
-TOKEN = os.environ.get("DISCORD_TOKEN")  # Token from Render environment variable
-DATA_FILE = "activity_logs.json"         # File to save activity logs
+TOKEN = os.environ.get("DISCORD_TOKEN")  # Must be set in Render → Environment
+if not TOKEN:
+    print("❌ ERROR: DISCORD_TOKEN environment variable not set")
+    sys.exit(1)
+
+DATA_FILE = "activity_logs.json"  # File to save activity logs
 TIMEZONES = {
     "UTC": datetime.timezone.utc,
     "EST": datetime.timezone(datetime.timedelta(hours=-5)),
@@ -24,21 +29,25 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- LOAD/INIT LOGS ----------
 if os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "r") as f:
-        raw_logs = json.load(f)
-        activity_logs = {
-            int(user_id): {
-                "total_seconds": data.get("total_seconds", 0),
-                "last_activity": datetime.datetime.fromisoformat(data["last_activity"])
-                if data.get("last_activity") else None,
-                "online": data.get("online", False)
+    try:
+        with open(DATA_FILE, "r") as f:
+            raw_logs = json.load(f)
+            activity_logs = {
+                int(user_id): {
+                    "total_seconds": data.get("total_seconds", 0),
+                    "last_activity": datetime.datetime.fromisoformat(data["last_activity"])
+                    if data.get("last_activity") else None,
+                    "online": data.get("online", False)
+                }
+                for user_id, data in raw_logs.items()
             }
-            for user_id, data in raw_logs.items()
-        }
+    except Exception:
+        print("⚠️ Corrupt activity_logs.json, resetting...")
+        activity_logs = {}
 else:
     activity_logs = {}
 
-last_messages = {}  # Stores last message per user
+last_messages = {}
 
 def save_logs():
     serializable_logs = {
@@ -63,14 +72,10 @@ def convert_timezone(dt: datetime.datetime, tz_name: str):
     return dt.astimezone(tz)
 
 def update_user_time(user_id: int):
-    """Update cumulative time for an online user."""
     now = datetime.datetime.now(datetime.timezone.utc)
     user_data = activity_logs.get(user_id)
-
     if not user_data or not user_data["online"] or not user_data["last_activity"]:
         return
-
-    # Add elapsed time since last check
     elapsed = (now - user_data["last_activity"]).total_seconds()
     if elapsed > 0:
         user_data["total_seconds"] += int(elapsed)
@@ -89,23 +94,28 @@ async def on_ready():
                     "online": True
                 }
     save_logs()
-    await bot.tree.sync()
+
+    if not update_all_users.is_running():
+        update_all_users.start()
+
+    try:
+        await bot.tree.sync()
+        print("✅ Slash commands synced.")
+    except Exception as e:
+        print(f"⚠️ Slash sync failed: {e}")
+
     print(f"✅ Logged in as {bot.user}")
 
 @bot.event
 async def on_presence_update(before, after):
     now = datetime.datetime.now(datetime.timezone.utc)
     user_id = after.id
-
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
 
-    # User comes online
     if before.status == discord.Status.offline and after.status != discord.Status.offline:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_activity"] = now
-
-    # User goes offline
     elif before.status != discord.Status.offline and after.status == discord.Status.offline:
         update_user_time(user_id)
         activity_logs[user_id]["online"] = False
@@ -117,14 +127,10 @@ async def on_presence_update(before, after):
 async def on_message(message):
     if message.author.bot:
         return
-
     now = datetime.datetime.now(datetime.timezone.utc)
     user_id = message.author.id
-
     if user_id not in activity_logs:
         activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False}
-
-    # Treat sending a message as being "active"
     if not activity_logs[user_id]["online"]:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_activity"] = now
@@ -142,26 +148,8 @@ async def update_all_users():
             update_user_time(user_id)
     save_logs()
 
-update_all_users.start()
-
 # ---------- SLASH COMMAND ----------
-period_choices = [
-    discord.app_commands.Choice(name="This week", value="this week"),
-    discord.app_commands.Choice(name="This hour", value="this hour"),
-    discord.app_commands.Choice(name="This month", value="this month"),
-    discord.app_commands.Choice(name="All time", value="all time"),
-]
-
-timezone_choices = [discord.app_commands.Choice(name=tz, value=tz) for tz in TIMEZONES.keys()]
-
 @bot.tree.command(name="timetrack", description="Check a user's tracked online time")
-@discord.app_commands.describe(
-    username="The user to check",
-    period="Timeframe",
-    show_last_message="Show last message?",
-    timezone="Convert timestamp to this timezone"
-)
-@discord.app_commands.choices(period=period_choices, timezone=timezone_choices)
 async def timetrack(
     interaction: discord.Interaction,
     username: discord.Member,
@@ -170,7 +158,6 @@ async def timetrack(
     timezone: str = "UTC"
 ):
     user_id = username.id
-
     if user_id not in activity_logs:
         await interaction.response.send_message("❌ No activity recorded for this user.", ephemeral=True)
         return
