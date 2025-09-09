@@ -3,18 +3,19 @@ import discord
 from discord.ext import commands, tasks
 import datetime
 
-MUTE_ROLE_ID = 1410423854563721287
-LOG_CHANNEL_ID = 1403422664521023648
+# ---------------- CONFIG ----------------
+MUTE_ROLE_ID = 1410423854563721287  # Replace with your mute role ID
+LOG_CHANNEL_ID = 1403422664521023648  # Replace with your log channel ID
 GUILD_ID = 1403359962369097739  # Replace with your guild ID
 
 class MuteCog(commands.Cog):
-    def __init__(self, bot):
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.active_mutes = {}  # {user_id: {"end_time": datetime, "reason": str, "proof": str}}
         if not self.check_mutes.is_running():
             self.check_mutes.start()
 
-    # ------------------ HELPERS ------------------
+    # ---------------- HELPERS ----------------
     def parse_duration(self, duration: str):
         if not duration:
             return 60
@@ -77,13 +78,14 @@ class MuteCog(commands.Cog):
             await member.send(f"You have been unmuted in {guild.name}.")
         except:
             pass
+
         log_channel = guild.get_channel(LOG_CHANNEL_ID)
         if log_channel:
             embed = discord.Embed(title="✅ User Unmuted", color=discord.Color.green())
-            embed.add_field(name="User", value=member.mention)
+            embed.add_field(name="User", value=member.mention, inline=False)
             await log_channel.send(embed=embed)
 
-    # ------------------ BACKGROUND TASK ------------------
+    # ---------------- BACKGROUND TASK ----------------
     @tasks.loop(seconds=10)
     async def check_mutes(self):
         now = datetime.datetime.utcnow()
@@ -91,7 +93,7 @@ class MuteCog(commands.Cog):
         for uid in to_remove:
             await self.remove_mute(uid)
 
-    # ------------------ COMMANDS ------------------
+    # ---------------- COMMANDS ----------------
     @commands.command(name="qmute")
     @commands.has_permissions(mute_members=True)
     async def qmute(self, ctx, duration: str = None, *, reason: str = "No reason provided"):
@@ -115,34 +117,32 @@ class MuteCog(commands.Cog):
     @commands.hybrid_command(name="rmute", description="Mute a user by replying to a message")
     @commands.has_permissions(mute_members=True)
     async def rmute(self, interaction: discord.Interaction, duration: str = None, reason: str = "No reason provided"):
-        """Mute a user via slash/hybrid command by replying to their message"""
-        # Resolve the replied message
         resolved = interaction.data.get("resolved", {}).get("messages", {})
         if not resolved:
             await interaction.response.send_message("❌ You must reply to a message.", ephemeral=True)
             return
 
         message_id = list(resolved.keys())[0]
-        message_data = resolved[message_id]
-        channel_id = int(message_data["channel_id"])
+        channel_id = int(resolved[message_id]["channel_id"])
         channel = self.bot.get_channel(channel_id)
         if not channel:
             await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
             return
 
-        try:
-            message = await channel.fetch_message(int(message_id))
-        except:
-            await interaction.response.send_message("❌ Message not found.", ephemeral=True)
-            return
-
+        message = await channel.fetch_message(int(message_id))
         member = message.author
         dur_seconds = self.parse_duration(duration)
         proof = f"[Message link](https://discord.com/channels/{interaction.guild.id}/{channel.id}/{message.id})"
+
         await self.apply_mute(member, dur_seconds, reason, proof)
 
-        await interaction.response.send_message(f"✅ {member.mention} has been muted.", ephemeral=True)
+        # Send embed with User / Duration / Reason
+        embed = discord.Embed(title="🔇 User Muted", color=discord.Color.red())
+        embed.add_field(name="User", value=member.mention, inline=False)
+        embed.add_field(name="Duration", value=str(datetime.timedelta(seconds=dur_seconds)), inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ------------------ Setup ------------------
-async def setup(bot):
+# ---------------- LOAD COG ----------------
+async def setup(bot: commands.Bot):
     await bot.add_cog(MuteCog(bot))
