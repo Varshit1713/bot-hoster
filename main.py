@@ -7,7 +7,6 @@ from discord.ext import commands, tasks
 import datetime
 import json
 import sys
-from discord import app_commands
 import asyncio
 
 # ------------------ CONFIG ------------------
@@ -20,7 +19,7 @@ DATA_FILE = "activity_logs.json"
 GUILD_ID = 1403359962369097739
 LOG_CHANNEL_ID = 1403422664521023648
 MUTE_ROLE_ID = 1410423854563721287
-INACTIVITY_THRESHOLD = 50  # 50s before marking as offline
+INACTIVITY_THRESHOLD = 50  # seconds
 
 # ------------------ FLASK ------------------
 app = Flask(__name__)
@@ -89,7 +88,9 @@ async def on_ready():
     if not update_all_users.is_running():
         update_all_users.start()
     try:
-        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+        # Only register to your guild to avoid duplicates globally
+        guild = discord.Object(id=GUILD_ID)
+        await bot.tree.sync(guild=guild)
         print("✅ Slash commands synced.")
     except Exception as e:
         print(f"⚠️ Slash sync failed: {e}")
@@ -113,7 +114,7 @@ async def on_message(message):
     else:
         activity_logs[uid]["last_activity"] = now
         activity_logs[uid]["online"] = True
-        activity_logs[uid]["offline_start"] = None  # reset offline timer
+        activity_logs[uid]["offline_start"] = None
 
     save_logs()
 
@@ -126,7 +127,7 @@ async def update_all_users():
         if data["online"] and data.get("last_activity"):
             elapsed = (now - data["last_activity"]).total_seconds()
 
-            if elapsed > INACTIVITY_THRESHOLD:  # mark inactive
+            if elapsed > INACTIVITY_THRESHOLD:
                 data["online"] = False
                 data["offline_start"] = now
             else:
@@ -144,7 +145,6 @@ async def update_all_users():
 
 # ------------------ TIMETRACK ------------------
 @bot.tree.command(name="timetrack", description="Show online/offline time for a user")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 async def timetrack(interaction: discord.Interaction, member: discord.Member):
     data = activity_logs.get(member.id)
     if not data:
@@ -169,10 +169,8 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member):
 
 # ------------------ RMUTE ------------------
 @bot.tree.command(name="rmute", description="Timeout (mute) a user with duration and reason")
-@app_commands.guilds(discord.Object(id=GUILD_ID))
 @app_commands.describe(user="User to timeout", duration="Duration (e.g. 10m, 1h, 2d)", reason="Reason for mute")
 async def rmute(interaction: discord.Interaction, user: discord.Member, duration: str, reason: str):
-    # parse duration
     unit = duration[-1]
     try:
         value = int(duration[:-1])
@@ -186,7 +184,6 @@ async def rmute(interaction: discord.Interaction, user: discord.Member, duration
         return
 
     until = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
-
     mute_role = interaction.guild.get_role(MUTE_ROLE_ID)
     log_channel = interaction.guild.get_channel(LOG_CHANNEL_ID)
 
@@ -197,7 +194,7 @@ async def rmute(interaction: discord.Interaction, user: discord.Member, duration
         await interaction.response.send_message("❌ Missing permissions to mute that user.", ephemeral=True)
         return
 
-    # remove role after duration
+    # Remove role after duration
     async def remove_mute():
         await asyncio.sleep(seconds)
         if mute_role in user.roles:
