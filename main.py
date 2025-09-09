@@ -59,7 +59,9 @@ if os.path.exists(DATA_FILE):
                     "monthly_seconds": data.get("monthly_seconds", 0),
                     "last_activity": datetime.datetime.fromisoformat(data["last_activity"]) if data.get("last_activity") else None,
                     "online": data.get("online", False),
-                    "first_seen": datetime.datetime.fromisoformat(data["first_seen"]) if data.get("first_seen") else datetime.datetime.now(datetime.timezone.utc)
+                    "first_seen": datetime.datetime.fromisoformat(data["first_seen"]) if data.get("first_seen") else datetime.datetime.now(datetime.timezone.utc),
+                    "weekly_start": datetime.datetime.fromisoformat(data.get("weekly_start")) if data.get("weekly_start") else datetime.datetime.now(datetime.timezone.utc),
+                    "monthly_start": datetime.datetime.fromisoformat(data.get("monthly_start")) if data.get("monthly_start") else datetime.datetime.now(datetime.timezone.utc)
                 }
                 for user_id, data in raw_logs.items()
             }
@@ -80,7 +82,9 @@ def save_logs():
             "monthly_seconds": data["monthly_seconds"],
             "last_activity": data["last_activity"].isoformat() if data["last_activity"] else None,
             "online": data["online"],
-            "first_seen": data["first_seen"].isoformat()
+            "first_seen": data["first_seen"].isoformat(),
+            "weekly_start": data["weekly_start"].isoformat(),
+            "monthly_start": data["monthly_start"].isoformat()
         }
         for user_id, data in activity_logs.items()
     }
@@ -118,12 +122,15 @@ def check_inactivity():
 def reset_periods():
     now = datetime.datetime.now(datetime.timezone.utc)
     for user_id, data in activity_logs.items():
-        if (now - data["first_seen"]).total_seconds() > WEEK_SECONDS:
+        # Weekly reset
+        if (now - data["weekly_start"]).total_seconds() > WEEK_SECONDS:
             data["weekly_seconds"] = 0
-            data["first_seen"] = now
-        if (now - data["first_seen"]).total_seconds() > MONTH_SECONDS:
+            data["weekly_start"] = now
+
+        # Monthly reset
+        if (now - data["monthly_start"]).total_seconds() > MONTH_SECONDS:
             data["monthly_seconds"] = 0
-            data["first_seen"] = now
+            data["monthly_start"] = now
 
 # ------------------ EVENTS ------------------
 @bot.event
@@ -139,7 +146,9 @@ async def on_ready():
                     "monthly_seconds": 0,
                     "last_activity": now if member.status != discord.Status.offline else None,
                     "online": member.status != discord.Status.offline,
-                    "first_seen": now
+                    "first_seen": now,
+                    "weekly_start": now,
+                    "monthly_start": now
                 }
     if not update_all_users.is_running():
         update_all_users.start()
@@ -164,7 +173,9 @@ async def on_message(message):
             "monthly_seconds": 0,
             "last_activity": now,
             "online": True,
-            "first_seen": now
+            "first_seen": now,
+            "weekly_start": now,
+            "monthly_start": now
         }
     else:
         activity_logs[user_id]["last_activity"] = now
@@ -191,43 +202,45 @@ async def update_all_users():
     check_inactivity()
     save_logs()
 
-# ------------------ SLASH COMMANDS ------------------
-async def send_time(interaction, username: discord.Member, seconds_online, seconds_offline, extra_msg=""):
-    status = "🟢 Online" if activity_logs[username.id]["online"] else "⚫ Offline"
-    msg = f"⏳ **{username.display_name}** has {format_time(seconds_online)} online.\n"
-    msg += f"**Status:** {status}\n"
-    msg += f"**Offline for:** {format_time(seconds_offline)}"
-    if extra_msg:
-        msg += f"\n{extra_msg}"
-    await interaction.response.send_message(msg)
-
-@bot.tree.command(name="timetrack", description="Show current online/offline time")
-async def timetrack(interaction: discord.Interaction, username: discord.Member, show_last_message: bool = False, timezone: str = "UTC"):
-    user = activity_logs.get(username.id)
+# ------------------ SEND TIME HELPER ------------------
+async def send_time(interaction, username: discord.Member, user_data, show_last_message=False, timezone="UTC"):
+    status = "🟢 Online" if user_data["online"] else "⚫ Offline"
     offline_time = 0
-    if not user["online"] and "offline_start" in user and user["offline_start"]:
-        offline_time = int((datetime.datetime.now(datetime.timezone.utc) - user["offline_start"]).total_seconds())
-    extra_msg = ""
+    if not user_data["online"] and "offline_start" in user_data and user_data["offline_start"]:
+        offline_time = int((datetime.datetime.now(datetime.timezone.utc) - user_data["offline_start"]).total_seconds())
+    
+    msg = f"⏳ **{username.display_name}**\n"
+    msg += f"🟢 Online time: {format_time(user_data['total_seconds'])}\n"
+    msg += f"⚫ Offline for: {format_time(user_data['offline_seconds'] + offline_time)}\n"
+    msg += f"📆 Daily: {format_time(user_data['total_seconds'])}, Weekly: {format_time(user_data['weekly_seconds'])}, Monthly: {format_time(user_data['monthly_seconds'])}"
+
     if show_last_message and username.id in last_messages:
         last_msg = last_messages[username.id]
         ts = convert_timezone(last_msg["timestamp"], timezone)
-        extra_msg = f"💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
-    await send_time(interaction, username, user["total_seconds"], user["offline_seconds"] + offline_time, extra_msg)
+        msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
+
+    await interaction.response.send_message(msg)
+
+# ------------------ SLASH COMMANDS ------------------
+@bot.tree.command(name="timetrack", description="Show current online/offline time")
+async def timetrack(interaction: discord.Interaction, username: discord.Member, show_last_message: bool = False, timezone: str = "UTC"):
+    user_data = activity_logs.get(username.id)
+    await send_time(interaction, username, user_data, show_last_message, timezone)
 
 @bot.tree.command(name="weekly", description="Show weekly online time")
 async def weekly(interaction: discord.Interaction, username: discord.Member):
-    user = activity_logs.get(username.id)
-    await send_time(interaction, username, user["weekly_seconds"], user["offline_seconds"])
+    user_data = activity_logs.get(username.id)
+    await send_time(interaction, username, user_data)
 
 @bot.tree.command(name="monthly", description="Show monthly online time")
 async def monthly(interaction: discord.Interaction, username: discord.Member):
-    user = activity_logs.get(username.id)
-    await send_time(interaction, username, user["monthly_seconds"], user["offline_seconds"])
+    user_data = activity_logs.get(username.id)
+    await send_time(interaction, username, user_data)
 
 @bot.tree.command(name="fulltime", description="Show total online and offline time")
 async def fulltime(interaction: discord.Interaction, username: discord.Member):
-    user = activity_logs.get(username.id)
-    await send_time(interaction, username, user["total_seconds"], user["offline_seconds"])
+    user_data = activity_logs.get(username.id)
+    await send_time(interaction, username, user_data)
 
 # ------------------ RUN BOT ------------------
 bot.run(TOKEN)
