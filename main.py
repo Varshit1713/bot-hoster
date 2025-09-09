@@ -20,7 +20,6 @@ MONTH_SECONDS = 30 * DAY_SECONDS
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------ TIME TRACKING ------------------
@@ -126,12 +125,20 @@ async def on_user_message(user_id: int):
     user["online"] = True
     user["offline_start"] = None
 
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    await on_user_message(message.author.id)
+    save_logs()
+    await bot.process_commands(message)
+
 @tasks.loop(seconds=10)
 async def update_all_users():
     now = datetime.datetime.now(datetime.timezone.utc)
     reset_periods()
     for uid, data in activity_logs.items():
-        if data["online"] and data["last_activity"]:
+        if data["online"] and data.get("last_activity"):
             delta = min(int((now - data["last_activity"]).total_seconds()), 10)
             if delta > 0:
                 update_user_time(uid, delta)
@@ -149,25 +156,10 @@ def format_time(seconds: int):
     m, s = divmod(rem, 60)
     return f"{h}h {m}m {s}s"
 
-async def send_time(interaction, username: discord.Member, user_data, show_last_message=False):
-    offline_time = 0
-    if not user_data["online"] and user_data.get("offline_start"):
-        offline_time = int((datetime.datetime.now(datetime.timezone.utc) - user_data["offline_start"]).total_seconds())
-    msg = f"⏳ **{username.display_name}**\n"
-    msg += f"🟢 Online time: `{format_time(user_data['total_seconds'])}`\n"
-    msg += f"⚫ Offline for: `{format_time(user_data['offline_seconds'] + offline_time)}`\n\n"
-    msg += "📆 **Periods**\n"
-    msg += f"Daily: `{format_time(user_data['daily_seconds'])}`\n"
-    msg += f"Weekly: `{format_time(user_data['weekly_seconds'])}`\n"
-    msg += f"Monthly: `{format_time(user_data['monthly_seconds'])}`"
-    await interaction.response.send_message(msg)
-
 # ------------------ RMUTE ------------------
-active_mutes = {}  # {user_id: {"end_time": datetime, "reason": str, "duration": str}}
+active_mutes = {}  # {user_id: {"end_time": datetime, "reason": str, "moderator": str}}
 
 def parse_duration(duration: str):
-    if not duration:
-        return 60
     try:
         unit = duration[-1]
         val = int(duration[:-1])
@@ -179,34 +171,30 @@ def parse_duration(duration: str):
         return 60
     return 60
 
-async def apply_mute(member: discord.Member, duration_seconds: int, reason: str, duration_text: str):
+async def apply_mute(member: discord.Member, duration_seconds: int, reason: str, moderator: str):
     role = member.guild.get_role(MUTE_ROLE_ID)
     if role and role not in member.roles:
         await member.add_roles(role)
+
     end_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=duration_seconds)
-    active_mutes[member.id] = {"end_time": end_time, "reason": reason, "duration": duration_text}
+    active_mutes[member.id] = {"end_time": end_time, "reason": reason, "moderator": moderator}
 
     # DM user
+    dm_time = datetime.datetime.now().strftime("%I:%M %p")
+    dm_msg = f"You have been muted in\n__𝚁𝙱𝚇𝚂𝙻 𝙲𝙾𝙼𝙼𝚄𝙽𝙸𝚃𝚈__ until\n**{end_time.date()}**\n**{dm_time}**\n**duration: {duration_seconds}s**\nReason: ***{reason}***"
     try:
-        end_date = end_time.strftime("%Y-%m-%d")
-        end_time_str = end_time.strftime("%H:%M:%S UTC")
-        dm_msg = (
-            f"You have been muted in\n"
-            f"__𝚁𝙱𝚇𝚂𝙻 𝙲𝙾𝙼𝙼𝚄𝙽𝙸𝚃𝚈__ until\n"
-            f"**{end_date}**\n"
-            f"**{end_time_str}**\n"
-            f"**duration: {duration_text}**\n"
-            f"Reason: `{reason}`"
-        )
         await member.send(dm_msg)
     except:
         dm_msg = "Could not DM user."
 
-    # Log channel embed
+    # Embed log
     log_channel = member.guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
-        embed = discord.Embed(title="🔇 User Muted", description=f"**User:** {member.mention}\n**Duration:** `{duration_text}`\n**Reason:** `{reason}`", color=discord.Color.red())
-        embed.set_thumbnail(url=member.avatar.url if member.avatar else None)
+        embed = discord.Embed(title="🔇 User Muted", color=discord.Color.red())
+        embed.set_author(name=member.display_name, icon_url=member.avatar.url if member.avatar else None)
+        embed.add_field(name="Duration", value=f"`{duration_seconds}s`", inline=True)
+        embed.add_field(name="Reason", value=f"***{reason}***", inline=True)
+        embed.add_field(name="Responsible", value=f"**{moderator}**", inline=True)
         embed.add_field(name="DM Message", value=f"```{dm_msg}```", inline=False)
         await log_channel.send(embed=embed)
 
@@ -220,7 +208,6 @@ async def remove_mute(user_id: int):
     role = guild.get_role(MUTE_ROLE_ID)
     if role in member.roles:
         await member.remove_roles(role)
-    # Log unmute
     log_channel = guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
         embed = discord.Embed(title="✅ User Unmuted", description=f"**User:** {member.mention}", color=discord.Color.green())
@@ -240,10 +227,29 @@ async def rmute(interaction: discord.Interaction, user: discord.Member, duration
         await interaction.response.send_message("❌ You do not have permission.", ephemeral=True)
         return
     dur_seconds = parse_duration(duration)
-    await apply_mute(user, dur_seconds, reason, duration)
-    await interaction.response.send_message(f"✅ *`{user.display_name}` has been muted for `{duration}`* with reason: `{reason}`")
+    await apply_mute(user, dur_seconds, reason, interaction.user.display_name)
+    await interaction.response.send_message(f"✅ *`{user.display_name}` has been muted for `{duration}`* with reason: ***{reason}***")
 
-# ------------------ BOT EVENTS ------------------
+# ------------------ TIMETRACK COMMAND ------------------
+@bot.tree.command(name="timetrack", description="Show online/offline time")
+async def timetrack(interaction: discord.Interaction, username: discord.Member):
+    user_data = activity_logs.get(username.id)
+    if not user_data:
+        await interaction.response.send_message("No activity tracked for this user.", ephemeral=True)
+        return
+    offline_time = 0
+    if not user_data["online"] and user_data.get("offline_start"):
+        offline_time = int((datetime.datetime.now(datetime.timezone.utc) - user_data["offline_start"]).total_seconds())
+    msg = f"⏳ **{username.display_name}**\n"
+    msg += f"🟢 Online time: `{format_time(user_data['total_seconds'])}`\n"
+    msg += f"⚫ Offline for: `{format_time(user_data['offline_seconds'] + offline_time)}`\n\n"
+    msg += "📆 **Periods**\n"
+    msg += f"Daily: `{format_time(user_data['daily_seconds'])}`\n"
+    msg += f"Weekly: `{format_time(user_data['weekly_seconds'])}`\n"
+    msg += f"Monthly: `{format_time(user_data['monthly_seconds'])}`"
+    await interaction.response.send_message(msg)
+
+# ------------------ READY ------------------
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
@@ -257,13 +263,4 @@ async def on_ready():
     except:
         pass
 
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    await on_user_message(message.author.id)
-    last_messages[message.author.id] = {"content": message.content, "timestamp": datetime.datetime.now(datetime.timezone.utc)}
-    save_logs()
-
-# ------------------ RUN BOT ------------------
 bot.run(TOKEN)
