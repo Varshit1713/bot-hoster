@@ -92,15 +92,12 @@ class TimeTrack(commands.Cog):
     def reset_periods(self):
         now = datetime.datetime.now(datetime.timezone.utc)
         for user in self.activity_logs.values():
-            # Daily reset at midnight UTC
             if user.get("last_daily_reset") is None or (now - user.get("last_daily_reset")).days >= 1:
                 user["daily_seconds"] = 0
                 user["last_daily_reset"] = now
-            # Weekly reset on Mondays
             if user.get("last_weekly_reset") is None or (now - user.get("last_weekly_reset")).days >= 7:
                 user["weekly_seconds"] = 0
                 user["last_weekly_reset"] = now
-            # Monthly reset on the 1st
             if user.get("last_monthly_reset") is None or now.month != user.get("last_monthly_reset").month:
                 user["monthly_seconds"] = 0
                 user["last_monthly_reset"] = now
@@ -137,6 +134,9 @@ class TimeTrack(commands.Cog):
             self.activity_logs[user_id]["last_message"] = now
         self.save_logs()
 
+        # This is the key fix: allow other commands to run
+        await self.bot.process_commands(message)
+
     # ------------------ COMMAND ------------------
     @commands.hybrid_command(name="timetrack", description="Check a user's tracked online/offline time")
     async def timetrack(self, ctx, username: discord.Member, show_last_message: bool = False, timezone: str = "UTC"):
@@ -168,5 +168,6 @@ class TimeTrack(commands.Cog):
 
         await ctx.send(msg)
 
+# ------------------ Setup ------------------
 async def setup(bot: commands.Bot):
     await bot.add_cog(TimeTrack(bot))
