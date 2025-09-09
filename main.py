@@ -21,9 +21,9 @@ TIMEZONES = {
     "PST": datetime.timezone(datetime.timedelta(hours=-8)),
     "CET": datetime.timezone(datetime.timedelta(hours=1)),
 }
-INACTIVITY_THRESHOLD = 60  # 1 minute inactivity
+INACTIVITY_THRESHOLD = 60  # seconds (1 minute)
 
-# ------------------ FLASK PORT BINDING ------------------
+# ------------------ FLASK (Render port binding) ------------------
 app = Flask(__name__)
 
 @app.route("/")
@@ -34,7 +34,8 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_flask).start()
+t = threading.Thread(target=run_flask, daemon=True)
+t.start()
 
 # ------------------ DISCORD BOT ------------------
 intents = discord.Intents.default()
@@ -43,19 +44,31 @@ intents.presences = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------ LOAD/INIT LOGS ------------------
+# ------------------ LOAD / INIT ------------------
+# Per-user schema:
+# {
+#   "total_seconds": int,
+#   "online": bool,
+#   "last_tick": ISO or None,    # last time we advanced the counter
+#   "last_seen": ISO or None,    # last real activity (message or presence change)
+#   "offline_since": ISO or None # when we marked them offline
+# }
+def _parse_time(v):
+    return datetime.datetime.fromisoformat(v) if v else None
+
 if os.path.exists(DATA_FILE):
     try:
         with open(DATA_FILE, "r") as f:
-            raw_logs = json.load(f)
-            activity_logs = {
-                int(user_id): {
-                    "total_seconds": data.get("total_seconds", 0),
-                    "last_activity": datetime.datetime.fromisoformat(data["last_activity"]) if data.get("last_activity") else None,
-                    "online": data.get("online", False),
-                    "offline_since": datetime.datetime.fromisoformat(data["offline_since"]) if data.get("offline_since") else None
-                }
-                for user_id, data in raw_logs.items()
+            raw = json.load(f)
+        activity_logs = {}
+        for uid, data in raw.items():
+            uid_i = int(uid)
+            activity_logs[uid_i] = {
+                "total_seconds": int(data.get("total_seconds", 0)),
+                "online": bool(data.get("online", False)),
+                "last_tick": _parse_time(data.get("last_tick")),
+                "last_seen": _parse_time(data.get("last_seen")),
+                "offline_since": _parse_time(data.get("offline_since")),
             }
     except Exception:
         print("⚠️ Corrupt activity_logs.json, resetting...")
@@ -63,23 +76,27 @@ if os.path.exists(DATA_FILE):
 else:
     activity_logs = {}
 
-last_messages = {}
+last_messages = {}  # {user_id: {"content": str, "timestamp": datetime}}
 
 def save_logs():
-    serializable_logs = {
-        str(user_id): {
-            "total_seconds": data["total_seconds"],
-            "last_activity": data["last_activity"].isoformat() if data["last_activity"] else None,
-            "offline_since": data["offline_since"].isoformat() if data.get("offline_since") else None,
-            "online": data["online"]
+    out = {}
+    for uid, d in activity_logs.items():
+        out[str(uid)] = {
+            "total_seconds": d.get("total_seconds", 0),
+            "online": d.get("online", False),
+            "last_tick": d["last_tick"].isoformat() if d.get("last_tick") else None,
+            "last_seen": d["last_seen"].isoformat() if d.get("last_seen") else None,
+            "offline_since": d["offline_since"].isoformat() if d.get("offline_since") else None,
         }
-        for user_id, data in activity_logs.items()
-    }
     with open(DATA_FILE, "w") as f:
-        json.dump(serializable_logs, f, indent=4)
+        json.dump(out, f, indent=4)
 
 # ------------------ HELPERS ------------------
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc)
+
 def format_time(seconds: int):
+    seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
     return f"{h}h {m}m {s}s"
@@ -88,49 +105,66 @@ def convert_timezone(dt: datetime.datetime, tz_name: str):
     tz = TIMEZONES.get(tz_name.upper(), datetime.timezone.utc)
     return dt.astimezone(tz)
 
-def update_user_time(user_id: int):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    user_data = activity_logs.get(user_id)
-    if not user_data or not user_data["online"] or not user_data["last_activity"]:
-        return
-    elapsed = (now - user_data["last_activity"]).total_seconds()
-    if elapsed > 0:
-        user_data["total_seconds"] += int(elapsed)
-        user_data["last_activity"] = now
+def ensure_user(uid: int):
+    if uid not in activity_logs:
+        activity_logs[uid] = {
+            "total_seconds": 0,
+            "online": False,
+            "last_tick": None,
+            "last_seen": None,
+            "offline_since": None,
+        }
 
-def check_inactivity():
-    now = datetime.datetime.now(datetime.timezone.utc)
-    for user_id, data in activity_logs.items():
-        if data["online"] and data["last_activity"]:
-            elapsed = (now - data["last_activity"]).total_seconds()
-            if elapsed > INACTIVITY_THRESHOLD:
-                data["online"] = False
-                data["offline_since"] = now
-                data["last_activity"] = None
+def go_online(uid: int, when: datetime.datetime):
+    d = activity_logs[uid]
+    d["online"] = True
+    d["last_seen"] = when           # real activity time
+    if d["last_tick"] is None:
+        d["last_tick"] = when       # start ticking from now
+    d["offline_since"] = None
+
+def go_offline_at(uid: int, offline_time: datetime.datetime):
+    """Stop counting exactly at offline_time."""
+    d = activity_logs[uid]
+    if d["online"] and d.get("last_tick"):
+        if offline_time > d["last_tick"]:
+            add = (offline_time - d["last_tick"]).total_seconds()
+            d["total_seconds"] += int(add)
+    d["online"] = False
+    d["last_tick"] = None
+    d["offline_since"] = offline_time
+    # keep last_seen as the last activity moment (optional)
 
 # ------------------ EVENTS ------------------
 @bot.event
 async def on_ready():
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = now_utc()
 
-    # Fix users who were online while bot was offline
-    for user_id, data in activity_logs.items():
-        if data["online"] and data["last_activity"]:
-            elapsed = (now - data["last_activity"]).total_seconds()
-            if elapsed > 0:
-                data["total_seconds"] += int(elapsed)
-                data["last_activity"] = now
+    # Reconcile state across restarts:
+    for uid, d in activity_logs.items():
+        if d["online"]:
+            # Compute where counting should have stopped at most
+            limit = now
+            if d.get("last_seen"):
+                inactivity_cutoff = d["last_seen"] + datetime.timedelta(seconds=INACTIVITY_THRESHOLD)
+                if inactivity_cutoff < limit:
+                    limit = inactivity_cutoff
+            if d.get("last_tick") and limit > d["last_tick"]:
+                d["total_seconds"] += int((limit - d["last_tick"]).total_seconds())
+            # If we already exceeded inactivity, mark offline at cutoff
+            if d.get("last_seen") and now >= (d["last_seen"] + datetime.timedelta(seconds=INACTIVITY_THRESHOLD)):
+                go_offline_at(uid, d["last_seen"] + datetime.timedelta(seconds=INACTIVITY_THRESHOLD))
+            else:
+                # Still considered online; restart ticking from 'now'
+                d["last_tick"] = now
+                d["offline_since"] = None
 
-    # Track members currently online
+    # If Discord currently shows members online, bring them online now
     for guild in bot.guilds:
         for member in guild.members:
             if member.status != discord.Status.offline:
-                if member.id not in activity_logs:
-                    activity_logs[member.id] = {"total_seconds": 0, "last_activity": now, "online": True, "offline_since": None}
-                else:
-                    activity_logs[member.id]["online"] = True
-                    activity_logs[member.id]["last_activity"] = now
-                    activity_logs[member.id]["offline_since"] = None
+                ensure_user(member.id)
+                go_online(member.id, now)
 
     save_logs()
 
@@ -147,20 +181,17 @@ async def on_ready():
 
 @bot.event
 async def on_presence_update(before, after):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    user_id = after.id
-    if user_id not in activity_logs:
-        activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False, "offline_since": None}
+    now = now_utc()
+    uid = after.id
+    ensure_user(uid)
 
+    # offline -> non-offline : user became active
     if before.status == discord.Status.offline and after.status != discord.Status.offline:
-        activity_logs[user_id]["online"] = True
-        activity_logs[user_id]["last_activity"] = now
-        activity_logs[user_id]["offline_since"] = None
+        go_online(uid, now)
+
+    # non-offline -> offline : user left
     elif before.status != discord.Status.offline and after.status == discord.Status.offline:
-        update_user_time(user_id)
-        activity_logs[user_id]["online"] = False
-        activity_logs[user_id]["offline_since"] = now
-        activity_logs[user_id]["last_activity"] = None
+        go_offline_at(uid, now)
 
     save_logs()
 
@@ -168,27 +199,41 @@ async def on_presence_update(before, after):
 async def on_message(message):
     if message.author.bot:
         return
-    now = datetime.datetime.now(datetime.timezone.utc)
-    user_id = message.author.id
-    if user_id not in activity_logs:
-        activity_logs[user_id] = {"total_seconds": 0, "last_activity": None, "online": False, "offline_since": None}
-    if not activity_logs[user_id]["online"]:
-        activity_logs[user_id]["online"] = True
-        activity_logs[user_id]["last_activity"] = now
-        activity_logs[user_id]["offline_since"] = None
-    else:
-        update_user_time(user_id)
+    now = now_utc()
+    uid = message.author.id
+    ensure_user(uid)
 
-    last_messages[user_id] = {"content": message.content, "timestamp": now}
+    # Message = activity. If offline, come online; if online, just refresh last_seen.
+    if not activity_logs[uid]["online"]:
+        go_online(uid, now)
+    else:
+        # Important: DO NOT touch last_tick here; only update last_seen.
+        activity_logs[uid]["last_seen"] = now
+
+    last_messages[uid] = {"content": message.content, "timestamp": now}
     save_logs()
 
 # ------------------ BACKGROUND TASK ------------------
 @tasks.loop(seconds=10)
 async def update_all_users():
-    check_inactivity()
-    for user_id, data in activity_logs.items():
-        if data["online"]:
-            update_user_time(user_id)
+    now = now_utc()
+
+    # 1) Advance counters for users currently online (tick from last_tick -> now)
+    for uid, d in activity_logs.items():
+        if d["online"] and d.get("last_tick"):
+            add = (now - d["last_tick"]).total_seconds()
+            if add > 0:
+                d["total_seconds"] += int(add)
+                d["last_tick"] = now  # move the tick forward
+
+    # 2) Auto mark offline if past inactivity threshold
+    for uid, d in activity_logs.items():
+        if d["online"] and d.get("last_seen"):
+            cutoff = d["last_seen"] + datetime.timedelta(seconds=INACTIVITY_THRESHOLD)
+            if now >= cutoff:
+                # stop counting exactly at cutoff, not now
+                go_offline_at(uid, cutoff)
+
     save_logs()
 
 # ------------------ SLASH COMMAND ------------------
@@ -199,30 +244,38 @@ async def timetrack(
     show_last_message: bool = False,
     timezone: str = "UTC"
 ):
-    user_id = username.id
-    if user_id not in activity_logs:
-        await interaction.response.send_message("❌ No activity recorded for this user.", ephemeral=True)
-        return
+    uid = username.id
+    ensure_user(uid)
 
-    update_user_time(user_id)
-    total_seconds = activity_logs[user_id]["total_seconds"]
-    status = "🟢 Online" if activity_logs[user_id]["online"] else "⚫ Offline"
+    # Advance up to 'now' for display if still online
+    now = now_utc()
+    d = activity_logs[uid]
+    display_total = d["total_seconds"]
 
-    msg = f"⏳ **{username.display_name}** has {format_time(total_seconds)} online.\n"
+    if d["online"] and d.get("last_tick"):
+        # But cap at inactivity cutoff if we've silently gone inactive
+        limit = now
+        if d.get("last_seen"):
+            cutoff = d["last_seen"] + datetime.timedelta(seconds=INACTIVITY_THRESHOLD)
+            if cutoff < limit:
+                limit = cutoff
+        if limit > d["last_tick"]:
+            display_total += int((limit - d["last_tick"]).total_seconds())
+
+    status = "🟢 Online" if d["online"] else "⚫ Offline"
+    msg = f"⏳ **{username.display_name}** has {format_time(display_total)} online.\n"
     msg += f"**Status:** {status}"
 
-    # Show "Offline for" if user is offline
-    if not activity_logs[user_id]["online"] and activity_logs[user_id].get("offline_since"):
-        offline_elapsed = (datetime.datetime.now(datetime.timezone.utc) - activity_logs[user_id]["offline_since"]).total_seconds()
+    if not d["online"] and d.get("offline_since"):
+        offline_elapsed = (now - d["offline_since"]).total_seconds()
         msg += f"\n⚫ Offline for: {format_time(int(offline_elapsed))}"
 
-    if show_last_message and user_id in last_messages:
-        last_msg = last_messages[user_id]
+    if show_last_message and uid in last_messages:
+        last_msg = last_messages[uid]
         ts = convert_timezone(last_msg["timestamp"], timezone)
         msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
 
     await interaction.response.send_message(msg)
-    save_logs()
 
 # ------------------ RUN BOT ------------------
 bot.run(TOKEN)
