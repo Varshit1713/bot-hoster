@@ -1,3 +1,4 @@
+# ------------------ IMPORTS ------------------
 import os
 import sys
 import threading
@@ -13,10 +14,12 @@ if not TOKEN:
     print("❌ DISCORD_TOKEN environment variable not set")
     sys.exit(1)
 
+# Server/mute config
 GUILD_ID = 123456789012345678  # replace with your server ID
 MUTE_ROLE_ID = 1410423854563721287
 LOG_CHANNEL_ID = 1403422664521023648
 
+# Time tracking config
 DATA_FILE = "activity_logs.json"
 INACTIVITY_THRESHOLD = 60  # seconds
 TIMEZONES = {
@@ -44,10 +47,9 @@ intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------ LOAD/INIT LOGS ------------------
+# ------------------ TIME TRACKING STORAGE ------------------
 if os.path.exists(DATA_FILE):
     try:
         with open(DATA_FILE, "r") as f:
@@ -61,7 +63,10 @@ if os.path.exists(DATA_FILE):
                     "monthly_seconds": data.get("monthly_seconds", 0),
                     "last_activity": datetime.datetime.fromisoformat(data["last_activity"]) if data.get("last_activity") else None,
                     "online": data.get("online", False),
-                    "last_message": datetime.datetime.fromisoformat(data["last_message"]) if data.get("last_message") else None
+                    "last_message": datetime.datetime.fromisoformat(data["last_message"]) if data.get("last_message") else None,
+                    "last_daily_reset": datetime.datetime.fromisoformat(data["last_daily_reset"]) if data.get("last_daily_reset") else None,
+                    "last_weekly_reset": datetime.datetime.fromisoformat(data["last_weekly_reset"]) if data.get("last_weekly_reset") else None,
+                    "last_monthly_reset": datetime.datetime.fromisoformat(data["last_monthly_reset"]) if data.get("last_monthly_reset") else None
                 }
     except Exception:
         print("⚠️ Corrupt activity_logs.json, resetting...")
@@ -79,12 +84,15 @@ def save_logs():
             "monthly_seconds": data.get("monthly_seconds", 0),
             "last_activity": data["last_activity"].isoformat() if data["last_activity"] else None,
             "online": data["online"],
-            "last_message": data["last_message"].isoformat() if data.get("last_message") else None
+            "last_message": data["last_message"].isoformat() if data.get("last_message") else None,
+            "last_daily_reset": data.get("last_daily_reset").isoformat() if data.get("last_daily_reset") else None,
+            "last_weekly_reset": data.get("last_weekly_reset").isoformat() if data.get("last_weekly_reset") else None,
+            "last_monthly_reset": data.get("last_monthly_reset").isoformat() if data.get("last_monthly_reset") else None
         }
     with open(DATA_FILE, "w") as f:
         json.dump(serializable_logs, f, indent=4)
 
-# ------------------ HELPERS ------------------
+# ------------------ TIME TRACKING HELPERS ------------------
 def format_time(seconds: int):
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -130,7 +138,6 @@ def reset_periods():
 # ------------------ MUTE STORAGE ------------------
 active_mutes = {}  # {user_id: {"end_time": datetime, "reason": str, "proof": str}}
 
-# ------------------ HELPERS ------------------
 def parse_duration(duration: str):
     if not duration:
         return 60
@@ -154,8 +161,7 @@ async def apply_mute(member: discord.Member, duration_seconds: int, reason: str,
     # DM user
     try:
         await member.send(f"You have been muted in {member.guild.name} until {end_time} UTC.\nReason: {reason}\nProof: {proof if proof else 'None'}")
-    except:
-        pass
+    except: pass
     # Log
     log_channel = member.guild.get_channel(LOG_CHANNEL_ID)
     if log_channel:
@@ -184,13 +190,22 @@ async def remove_mute(user_id: int):
         embed.add_field(name="User", value=member.mention)
         await log_channel.send(embed=embed)
 
-# ------------------ BACKGROUND TASK ------------------
+# ------------------ BACKGROUND TASKS ------------------
 @tasks.loop(seconds=10)
 async def check_mutes():
     now = datetime.datetime.utcnow()
     to_remove = [uid for uid, data in active_mutes.items() if now >= data["end_time"]]
     for uid in to_remove:
         await remove_mute(uid)
+
+@tasks.loop(seconds=10)
+async def update_all_users():
+    check_inactivity()
+    reset_periods()
+    for user_id, user in activity_logs.items():
+        if user["online"]:
+            update_user_time(user_id)
+    save_logs()
 
 # ------------------ COMMANDS ------------------
 def has_mute_perm(ctx):
@@ -258,23 +273,17 @@ async def on_message(message):
             "monthly_seconds": 0,
             "last_activity": None,
             "online": True,
-            "last_message": now
+            "last_message": now,
+            "last_daily_reset": None,
+            "last_weekly_reset": None,
+            "last_monthly_reset": None
         }
     else:
         activity_logs[user_id]["online"] = True
         activity_logs[user_id]["last_message"] = now
     save_logs()
 
-# ------------------ BACKGROUND TASKS ------------------
-@tasks.loop(seconds=10)
-async def update_all_users():
-    check_inactivity()
-    reset_periods()
-    for user_id, user in activity_logs.items():
-        if user["online"]:
-            update_user_time(user_id)
-    save_logs()
-
+# ------------------ TIME TRACKING SLASH COMMAND ------------------
 @bot.tree.command(name="timetrack", description="Check a user's tracked online/offline time")
 async def timetrack(
     interaction: discord.Interaction,
@@ -300,10 +309,9 @@ async def timetrack(
     msg += f"🟢 Online time: {format_time(online_time)}\n"
     msg += f"⚫ Offline for: {format_time(offline_seconds)}\n"
     msg += f"📆 Daily: {format_time(daily_time)}, Weekly: {format_time(weekly_time)}, Monthly: {format_time(monthly_time)}\n"
-    if show_last_message and user if show_last_message and user.get("last_message"):
+    if show_last_message and user.get("last_message"):
         ts = convert_timezone(user["last_message"], timezone)
         msg += f"💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}]"
-
     await interaction.response.send_message(msg)
 
 # ------------------ RUN BOT ------------------
