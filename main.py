@@ -5,9 +5,9 @@ import json
 import os
 
 # ---------- CONFIG ----------
-TOKEN = os.environ.get("DISCORD_TOKEN")  # Bot token
-DATA_FILE = "activity_logs.json"         # Persistent storage
-ACTIVITY_WINDOW = 300                     # 5 minutes window (seconds)
+TOKEN = os.environ.get("DISCORD_TOKEN")  # Your bot token in Render env
+DATA_FILE = "activity_logs.json"
+ACTIVITY_WINDOW = 300  # 5 minutes in seconds
 TIMEZONES = {
     "UTC": datetime.timezone.utc,
     "EST": datetime.timezone(datetime.timedelta(hours=-5)),
@@ -60,7 +60,9 @@ def update_cumulative_time():
     now = datetime.datetime.utcnow()
     for user_id, data in activity_logs.items():
         last = data.get("last_activity")
-        if last:
+        status = data.get("status", "offline")
+        # Only count if user is active within window and not offline
+        if last and status != "offline":
             elapsed = (now - last).total_seconds()
             if elapsed <= ACTIVITY_WINDOW:
                 data["total_seconds"] += UPDATE_INTERVAL
@@ -71,9 +73,9 @@ def get_total_time(user_id):
     if not data:
         return 0
     total = data["total_seconds"]
-    # Add ongoing session if within activity window
     last = data.get("last_activity")
-    if last:
+    status = data.get("status", "offline")
+    if last and status != "offline":
         elapsed = (datetime.datetime.utcnow() - last).total_seconds()
         if elapsed <= ACTIVITY_WINDOW:
             total += elapsed
@@ -87,22 +89,39 @@ async def on_ready():
     background_updater.start()
 
 @bot.event
+async def on_presence_update(before, after):
+    now = datetime.datetime.utcnow()
+    user_id = after.id
+    data = activity_logs.setdefault(user_id, {
+        "total_seconds": 0,
+        "last_activity": None,
+        "status": str(after.status),
+        "last_message": None
+    })
+    data["status"] = str(after.status)
+    if after.status != discord.Status.offline:
+        # Only refresh last_activity if outside activity window
+        if not data["last_activity"] or (now - data["last_activity"]).total_seconds() > ACTIVITY_WINDOW:
+            data["last_activity"] = now
+    save_logs()
+
+@bot.event
 async def on_message(message):
     if message.author.bot:
         return
     now = datetime.datetime.utcnow()
     user_id = message.author.id
-    logs = activity_logs.setdefault(user_id, {
+    data = activity_logs.setdefault(user_id, {
         "total_seconds": 0,
         "last_activity": now,
         "status": str(message.author.status),
         "last_message": {"content": message.content, "timestamp": now.isoformat()}
     })
     # Only refresh last_activity if outside activity window
-    if not logs.get("last_activity") or (now - logs["last_activity"]).total_seconds() > ACTIVITY_WINDOW:
-        logs["last_activity"] = now
-    logs["status"] = str(message.author.status)
-    logs["last_message"] = {"content": message.content, "timestamp": now.isoformat()}
+    if not data.get("last_activity") or (now - data["last_activity"]).total_seconds() > ACTIVITY_WINDOW:
+        data["last_activity"] = now
+    data["status"] = str(message.author.status)
+    data["last_message"] = {"content": message.content, "timestamp": now.isoformat()}
     save_logs()
 
 # ---------- BACKGROUND TASK ----------
