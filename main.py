@@ -1,79 +1,146 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import datetime
 import json
 import os
 
-TOKEN = os.environ.get("DISCORD_TOKEN")
-DATA_FILE = "activity_logs.json"
+# ---------- CONFIG ----------
+TOKEN = os.environ.get("DISCORD_TOKEN")  # Bot token
+DATA_FILE = "activity_logs.json"         # Persistent storage
+ACTIVITY_WINDOW = 300                     # 5 minutes window (seconds)
+TIMEZONES = {
+    "UTC": datetime.timezone.utc,
+    "EST": datetime.timezone(datetime.timedelta(hours=-5)),
+    "PST": datetime.timezone(datetime.timedelta(hours=-8)),
+    "CET": datetime.timezone(datetime.timedelta(hours=1)),
+}
+UPDATE_INTERVAL = 60  # seconds, background update interval
+# -----------------------------
 
 intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Load or initialize logs
+# ---------- LOAD/INIT LOGS ----------
 if os.path.exists(DATA_FILE):
     with open(DATA_FILE, "r") as f:
-        activity_logs = json.load(f)
+        raw_logs = json.load(f)
+        activity_logs = {
+            int(user_id): {
+                "total_seconds": s["total_seconds"],
+                "last_activity": datetime.datetime.fromisoformat(s["last_activity"]) if s.get("last_activity") else None,
+                "status": s.get("status", "offline"),
+                "last_message": s.get("last_message")
+            } for user_id, s in raw_logs.items()
+        }
 else:
     activity_logs = {}
 
-# Helper to save
 def save_logs():
+    serializable = {}
+    for user_id, data in activity_logs.items():
+        serializable[str(user_id)] = {
+            "total_seconds": data["total_seconds"],
+            "last_activity": data["last_activity"].isoformat() if data.get("last_activity") else None,
+            "status": data.get("status", "offline"),
+            "last_message": data.get("last_message")
+        }
     with open(DATA_FILE, "w") as f:
-        json.dump(activity_logs, f, indent=4)
+        json.dump(serializable, f, indent=4)
 
-# Update time on presence change
-@bot.event
-async def on_presence_update(before, after):
-    user_id = str(after.id)
-    now = datetime.datetime.utcnow().timestamp()
-    logs = activity_logs.setdefault(user_id, {"total_seconds": 0, "last_online": None, "status": "offline"})
-    
-    logs["status"] = str(after.status)
-    
-    # Went online
-    if before.status == discord.Status.offline and after.status != discord.Status.offline:
-        logs["last_online"] = now
-    
-    # Went offline
-    elif before.status != discord.Status.offline and after.status == discord.Status.offline:
-        if logs["last_online"]:
-            logs["total_seconds"] += now - logs["last_online"]
-            logs["last_online"] = None
-    
+# ---------- HELPERS ----------
+def convert_timezone(dt: datetime.datetime, tz_name: str):
+    tz = TIMEZONES.get(tz_name.upper(), datetime.timezone.utc)
+    return dt.astimezone(tz)
+
+def update_cumulative_time():
+    now = datetime.datetime.utcnow()
+    for user_id, data in activity_logs.items():
+        last = data.get("last_activity")
+        if last:
+            elapsed = (now - last).total_seconds()
+            if elapsed <= ACTIVITY_WINDOW:
+                data["total_seconds"] += UPDATE_INTERVAL
     save_logs()
 
-# Compute current online time
 def get_total_time(user_id):
-    logs = activity_logs.get(str(user_id))
-    if not logs:
+    data = activity_logs.get(user_id)
+    if not data:
         return 0
-    total = logs["total_seconds"]
-    # Add ongoing session if user is currently online
-    if logs["last_online"]:
-        total += datetime.datetime.utcnow().timestamp() - logs["last_online"]
+    total = data["total_seconds"]
+    # Add ongoing session if within activity window
+    last = data.get("last_activity")
+    if last:
+        elapsed = (datetime.datetime.utcnow() - last).total_seconds()
+        if elapsed <= ACTIVITY_WINDOW:
+            total += elapsed
     return int(total)
 
-# Slash command
-@bot.tree.command(name="timetrack", description="Show total online time")
-@discord.app_commands.describe(username="User to check")
-async def timetrack(interaction: discord.Interaction, username: discord.Member):
-    total_seconds = get_total_time(username.id)
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    status = activity_logs.get(str(username.id), {}).get("status", "offline").capitalize()
-    
-    await interaction.response.send_message(
-        f"⏳ **{username.display_name}** has {hours}h {minutes}m {seconds}s online.\nStatus: {status}"
-    )
-
+# ---------- EVENTS ----------
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     await bot.tree.sync()
+    background_updater.start()
 
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    now = datetime.datetime.utcnow()
+    user_id = message.author.id
+    logs = activity_logs.setdefault(user_id, {
+        "total_seconds": 0,
+        "last_activity": now,
+        "status": str(message.author.status),
+        "last_message": {"content": message.content, "timestamp": now.isoformat()}
+    })
+    # Only refresh last_activity if outside activity window
+    if not logs.get("last_activity") or (now - logs["last_activity"]).total_seconds() > ACTIVITY_WINDOW:
+        logs["last_activity"] = now
+    logs["status"] = str(message.author.status)
+    logs["last_message"] = {"content": message.content, "timestamp": now.isoformat()}
+    save_logs()
+
+# ---------- BACKGROUND TASK ----------
+@tasks.loop(seconds=UPDATE_INTERVAL)
+async def background_updater():
+    update_cumulative_time()
+
+# ---------- SLASH COMMAND ----------
+timezone_choices = [discord.app_commands.Choice(name=tz, value=tz) for tz in TIMEZONES.keys()]
+
+@bot.tree.command(name="timetrack", description="Show total online time based on activity")
+@discord.app_commands.describe(
+    username="User to check",
+    show_last_message="Include last message?",
+    timezone="Display times in this timezone"
+)
+@discord.app_commands.choices(timezone=timezone_choices)
+async def timetrack(
+    interaction: discord.Interaction,
+    username: discord.Member,
+    show_last_message: bool = False,
+    timezone: str = "UTC"
+):
+    total_seconds = get_total_time(username.id)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    status = activity_logs.get(username.id, {}).get("status", "offline").capitalize()
+
+    msg = f"⏳ **{username.display_name}** has {hours}h {minutes}m {seconds}s online.\nStatus: {status}"
+
+    if show_last_message and username.id in activity_logs:
+        last_msg = activity_logs[username.id].get("last_message")
+        if last_msg:
+            ts = convert_timezone(datetime.datetime.fromisoformat(last_msg["timestamp"]), timezone)
+            msg += f"\n💬 Last message ({timezone}): [{ts.strftime('%Y-%m-%d %H:%M:%S')}] {last_msg['content']}"
+
+    await interaction.response.send_message(msg)
+
+# ---------- RUN BOT ----------
 bot.run(TOKEN)
