@@ -206,7 +206,7 @@ embed.add_field(name="🔴 Offline Time", value=offline_time, inline=True)
 embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
 await interaction.response.send_message(embed=embed)
 
------------------- MUTE COMMAND ------------------
+# ------------------ MUTE COMMAND ------------------
 
 @bot.tree.command(name="rmute", description="Mute a member with duration and reason")
 @app_commands.describe(member="Member to mute", duration="Duration in minutes", reason="Reason for mute")
@@ -232,7 +232,7 @@ save_data()
 await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))  
 await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
 
------------------- UNMUTE COMMAND ------------------
+# ------------------ UNMUTE COMMAND ------------------
 
 @bot.tree.command(name="runmute", description="Unmute a member manually")
 @app_commands.describe(member="Member to unmute")
@@ -258,7 +258,7 @@ if muted_role in member.roles:
 else:  
     await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
 
------------------- RUN BOT ------------------
+# ------------------ RUN BOT ------------------
 
 Start Flask web server in background
 
