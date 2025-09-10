@@ -245,7 +245,8 @@ async def rmute(interaction: discord.Interaction, member: discord.Member, durati
     log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()
     log["mute_reason"] = reason
     log["mute_responsible"] = interaction.user.id
-    save_data await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
+    save_data 
+    await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
     await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
 
 @bot.tree.command(name="runmute", description="Unmute a member manually")
