@@ -1,8 +1,8 @@
 # ------------------ IMPORTS ------------------
 import os
 import discord
-from discord.ext import commands, tasks
 from discord import app_commands
+from discord.ext import commands, tasks
 import datetime
 import json
 import random
@@ -173,6 +173,7 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
     if not log_channel:
         print("⚠️ Log channel not found or bot lacks access.")
         return
+
     embed = discord.Embed(
         title="🔒 Mute Log" if not unmuted else "✅ Unmute Log",
         color=0xFF0000 if not unmuted else 0x00FF00,
@@ -186,13 +187,17 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         embed.add_field(name="📝 Reason", value=reason, inline=False)
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
+        # Unmute time in 4 timezones
         unmute_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(duration.split('D')[0])*86400 + int(duration.split('D')[1].split('H')[0])*3600)
         unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
         tz_lines = [f"{emoji} {unmute_time.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
         embed.add_field(name="🕒 Unmute Time", value="\n".join(tz_lines), inline=False)
     if unmuted and log:
         embed.add_field(name="📝 Original Reason", value=log.get("mute_reason", "N/A"), inline=False)
-    await log_channel.send(embed=embed)
+    try:
+        await log_channel.send(embed=embed)
+    except discord.HTTPException:
+        print("⚠️ Failed to send mute/unmute embed.")
 
 # ------------------ SLASH COMMANDS ------------------
 @bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
@@ -259,8 +264,6 @@ async def runmute(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
 
 # ------------------ RUN BOT ------------------
-# Start Flask web server in the background for Render
-threading.Thread(target=run_web).start()
-
-# Start the bot
+# Start Flask web server in background
+threading.Thread(target=run_web, daemon=True).start()
 bot.run(TOKEN)
