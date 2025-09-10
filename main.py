@@ -1,8 +1,8 @@
 # ------------------ IMPORTS ------------------
 import os
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
+from discord import app_commands
 import datetime
 import json
 import random
@@ -21,8 +21,8 @@ MUTED_ROLE_ID = 1410423854563721287
 LOG_CHANNEL_ID = 1403422664521023648
 
 DATA_FILE = "activity_logs.json"
-INACTIVITY_THRESHOLD_MIN = 50  # seconds
-INACTIVITY_THRESHOLD_MAX = 60  # seconds
+INACTIVITY_THRESHOLD_MIN = 50
+INACTIVITY_THRESHOLD_MAX = 60
 
 TIMEZONES = {
     "🌎 UTC": ZoneInfo("UTC"),
@@ -126,7 +126,6 @@ async def timetrack_update():
                 log["online_seconds"] += 5
                 log["offline_start"] = None
                 log["offline_seconds"] = 0
-
         # Daily / Weekly / Monthly resets
         today = datetime.datetime.utcnow().date()
         weekday = today.isocalendar()[1]
@@ -140,12 +139,9 @@ async def timetrack_update():
         if not log.get("last_monthly_reset") or log["last_monthly_reset"] != str(month):
             log["monthly_seconds"] = 0
             log["last_monthly_reset"] = str(month)
-
-        # Only add online seconds if not offline
-        if delta_since_last_msg < log["offline_delay"]:
-            log["daily_seconds"] += 5
-            log["weekly_seconds"] += 5
-            log["monthly_seconds"] += 5
+        log["daily_seconds"] += 5
+        log["weekly_seconds"] += 5
+        log["monthly_seconds"] += 5
     save_data()
 
 @tasks.loop(seconds=5)
@@ -177,7 +173,6 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
     if not log_channel:
         print("⚠️ Log channel not found or bot lacks access.")
         return
-
     embed = discord.Embed(
         title="🔒 Mute Log" if not unmuted else "✅ Unmute Log",
         color=0xFF0000 if not unmuted else 0x00FF00,
@@ -191,17 +186,13 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         embed.add_field(name="📝 Reason", value=reason, inline=False)
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
-        # Unmute time in 4 timezones
         unmute_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(duration.split('D')[0])*86400 + int(duration.split('D')[1].split('H')[0])*3600)
         unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
         tz_lines = [f"{emoji} {unmute_time.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
         embed.add_field(name="🕒 Unmute Time", value="\n".join(tz_lines), inline=False)
     if unmuted and log:
         embed.add_field(name="📝 Original Reason", value=log.get("mute_reason", "N/A"), inline=False)
-    try:
-        await log_channel.send(embed=embed)
-    except discord.Forbidden:
-        print(f"⚠️ Cannot send embed in log channel for {member}.")
+    await log_channel.send(embed=embed)
 
 # ------------------ SLASH COMMANDS ------------------
 @bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
@@ -227,60 +218,49 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member = N
 @bot.tree.command(name="rmute", description="Mute a member with duration and reason")
 @app_commands.describe(member="Member to mute", duration="Duration in minutes", reason="Reason for mute")
 async def rmute(interaction: discord.Interaction, member: discord.Member, duration: int, reason: str):
-"""Mute a member for a specific duration in minutes."""
-guild = interaction.guild
-muted_role = guild.get_role(MUTED_ROLE_ID)
-if not muted_role:
-await interaction.response.send_message("Muted role not found.", ephemeral=True)
-return
-
-try:  
-    await member.add_roles(muted_role, reason=reason)  
-except discord.Forbidden:  
-    await interaction.response.send_message(f"⚠️ Missing permission to add Muted role to {member}.", ephemeral=True)  
-    return  
-
-delta = datetime.timedelta(minutes=duration)  
-log = get_user_log(member.id)  
-log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()  
-log["mute_reason"] = reason  
-log["mute_responsible"] = interaction.user.id  
-save_data()  
-
-duration_str = format_duration(delta.total_seconds())  
-await send_mute_log(member, reason=reason, responsible=interaction.user, duration=duration_str)  
-await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
-
------------------- UNMUTE COMMAND ------------------
+    guild = interaction.guild
+    muted_role = guild.get_role(MUTED_ROLE_ID)
+    if not muted_role:
+        await interaction.response.send_message("Muted role not found.", ephemeral=True)
+        return
+    try:
+        await member.add_roles(muted_role)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"⚠️ Missing permission to add Muted role to {member}.", ephemeral=True)
+        return
+    delta = datetime.timedelta(minutes=duration)
+    log = get_user_log(member.id)
+    log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()
+    log["mute_reason"] = reason
+    log["mute_responsible"] = interaction.user.id
+    save_data()
+    await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
+    await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
 
 @bot.tree.command(name="runmute", description="Unmute a member manually")
 @app_commands.describe(member="Member to unmute")
 async def runmute(interaction: discord.Interaction, member: discord.Member):
-guild = interaction.guild
-muted_role = guild.get_role(MUTED_ROLE_ID)
-log = get_user_log(member.id)
+    guild = interaction.guild
+    muted_role = guild.get_role(MUTED_ROLE_ID)
+    log = get_user_log(member.id)
+    if muted_role in member.roles:
+        try:
+            await member.remove_roles(muted_role)
+        except discord.Forbidden:
+            await interaction.response.send_message(f"⚠️ Missing permission to remove Muted role from {member}.", ephemeral=True)
+            return
+        await send_mute_log(member, unmuted=True, log=log)
+        log["mute_expires"] = None
+        log["mute_reason"] = None
+        log["mute_responsible"] = None
+        save_data()
+        await interaction.response.send_message(f"✅ {member.mention} has been unmuted by {interaction.user.mention}.")
+    else:
+        await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
 
-if muted_role in member.roles:  
-    try:  
-        await member.remove_roles(muted_role, reason=f"Unmuted by {interaction.user}")  
-    except discord.Forbidden:  
-        await interaction.response.send_message(f"⚠️ Missing permission to remove Muted role from {member}.", ephemeral=True)  
-        return  
-
-    log["mute_expires"] = None  
-    log["mute_reason"] = None  
-    log["mute_responsible"] = None  
-    save_data()  
-    await send_mute_log(member, unmuted=True, log=log)  
-    await interaction.response.send_message(f"✅ {member.mention} has been unmuted by {interaction.user.mention}.")  
-else:  
-    await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
-
------------------- RUN BOT ------------------
-
-if name == "main":
-# Start Flask web server in background
+# ------------------ RUN BOT ------------------
+# Start Flask web server in the background for Render
 threading.Thread(target=run_web).start()
 
-# Run Discord bot  
+# Start the bot
 bot.run(TOKEN)
