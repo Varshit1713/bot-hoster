@@ -281,6 +281,25 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ------------------ RUN BOT ------------------
-
 TOKEN = os.environ.get("DISCORD_TOKEN")  # Set in Render or local environment
-bot.run(TOKEN, log_handler=None, port=int(os.environ.get("PORT", 8080)))  # Open port for Render
+
+# Optional: Keep bot alive on Render with a web server
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+app = web.Application()
+app.add_routes([web.get("/", handle)])
+port = int(os.environ.get("PORT", 8080))
+web_runner = web.AppRunner(app)
+
+async def start_web():
+    await web_runner.setup()
+    site = web.TCPSite(web_runner, "0.0.0.0", port)
+    await site.start()
+
+bot.loop.create_task(start_web())
+
+# Start bot
+bot.run(TOKEN)
