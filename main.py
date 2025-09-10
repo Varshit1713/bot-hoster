@@ -1,3 +1,4 @@
+# ------------------ IMPORTS ------------------
 import discord
 from discord.ext import commands, tasks
 import asyncio
@@ -5,11 +6,12 @@ import datetime
 from zoneinfo import ZoneInfo
 import os
 import json
-from aiohttp import web
+from flask import Flask
+import threading
 
 # ------------------ CONFIG ------------------
 GUILD_ID = 1403359962369097739
-LOG_CHANNEL_ID = 1403422843894759534
+LOG_CHANNEL_ID = 1403422664521023648   # Updated channel ID you gave
 MUTED_ROLE_ID = 1410423854563721287
 TIMEZONES = {
     "🌎 UTC": ZoneInfo("UTC"),
@@ -21,10 +23,11 @@ TIMEZONES = {
 DATA_FILE = "activity_logs.json"
 activity_logs = {}
 
+# ------------------ INTENTS & BOT ------------------
 intents = discord.Intents.default()
 intents.members = True
 intents.presences = True
-intents.message_content = True
+intents.messages = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ------------------ HELPER FUNCTIONS ------------------
@@ -58,48 +61,30 @@ def format_duration(seconds):
     if s: parts.append(f"{s}s")
     return " ".join(parts) if parts else "0s"
 
-# ------------------ SIMPLE WEB SERVER FOR RENDER ------------------
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
-async def start_web():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"🌐 Web server running on port {port}")
-
-# Start the web server in the background
-asyncio.get_event_loop().create_task(start_web())
-
-# ------------------ LOAD DATA ------------------
-load_data()
 # ------------------ RMUTE ------------------
 @bot.command()
 async def rmute(ctx, member: discord.Member, duration: str, *, reason: str):
-    """Mute a member: adds role, sets timeout, sends DM, logs, and tracks duration"""
+    """Mute a member"""
     guild = ctx.guild
     muted_role = guild.get_role(MUTED_ROLE_ID)
     log = get_user_log(member.id)
 
-    # Convert duration (e.g., 10s, 5m, 2h, 1d)
-    multipliers = {"s":1, "m":60, "h":3600, "d":86400}
+    # Convert duration
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
     try:
         amount, unit = int(duration[:-1]), duration[-1]
         seconds = amount * multipliers.get(unit, 60)
     except:
-        return await ctx.send("❌ Invalid duration format. Use 10s, 5m, 2h, 1d, etc.")
+        return await ctx.send("❌ Invalid duration format. Use 1m, 1h, 1d, etc.")
 
-    # Add role & Discord timeout
+    # Add role + Discord timeout
     try:
         await member.add_roles(muted_role)
         await member.timeout(datetime.timedelta(seconds=seconds))
-        try: 
+        try:
             await member.send(f"🔇 You have been muted for {duration}. Reason: {reason}")
-        except: pass
+        except:
+            pass
     except discord.Forbidden:
         return await ctx.send(f"⚠️ Missing permissions to mute {member}.")
 
@@ -122,211 +107,159 @@ async def rmute(ctx, member: discord.Member, duration: str, *, reason: str):
     embed.add_field(name="Muted by", value=ctx.author.mention, inline=True)
     embed.add_field(name="Duration", value=duration, inline=True)
     embed.add_field(name="Reason", value=reason, inline=False)
-    tz_times = [f"{emoji} {(datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)).replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
+    tz_times = [
+        f"{emoji} {(datetime.datetime.utcnow() + datetime.timedelta(seconds=seconds)).replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}"
+        for emoji, tz in TIMEZONES.items()
+    ]
     embed.add_field(name="Unmute Timezones", value="\n".join(tz_times), inline=False)
     if log_channel:
         await log_channel.send(embed=embed)
     await ctx.send(f"✅ {member.mention} has been muted.")
-
-# ------------------ RUNMUTE ------------------
+    # ------------------ RUNMUTE ------------------
 @bot.command()
 async def runmute(ctx, member: discord.Member):
-    """Unmute a member"""
+    """Unmute a member manually"""
     guild = ctx.guild
     muted_role = guild.get_role(MUTED_ROLE_ID)
     log = get_user_log(member.id)
 
-    if muted_role in member.roles:
+    try:
+        await member.remove_roles(muted_role)
+        await member.timeout(None)  # remove timeout
         try:
-            await member.remove_roles(muted_role)
-            await member.timeout(None)
-            try: await member.send("✅ You have been unmuted.")
-            except: pass
-        except discord.Forbidden:
-            return await ctx.send(f"⚠️ Missing permissions to unmute {member}.")
+            await member.send("🔊 You have been unmuted.")
+        except:
+            pass
+    except discord.Forbidden:
+        return await ctx.send(f"⚠️ Missing permissions to unmute {member}.")
 
-        log["mute_expires"] = None
-        log["mute_reason"] = None
-        log["mute_responsible"] = None
-        save_data()
+    log["mute_expires"] = None
+    save_data()
 
-        # Log embed
-        log_channel = guild.get_channel(LOG_CHANNEL_ID)
-        embed = discord.Embed(
-            title="✅ User Unmuted",
-            description=f"{member.mention} has been unmuted",
-            color=0x00FF00,
-            timestamp=datetime.datetime.utcnow()
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="Unmuted by", value=ctx.author.mention, inline=True)
-        if log_channel:
-            await log_channel.send(embed=embed)
-        await ctx.send(f"✅ {member.mention} has been unmuted.")
-    else:
-        await ctx.send(f"ℹ️ {member.mention} is not muted.")
+    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    embed = discord.Embed(
+        title="🔊 User Unmuted",
+        description=f"{member.mention} has been unmuted",
+        color=0x00FF00,
+        timestamp=datetime.datetime.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="Unmuted by", value=ctx.author.mention, inline=True)
+    if log_channel:
+        await log_channel.send(embed=embed)
+    await ctx.send(f"✅ {member.mention} has been unmuted.")
 
 # ------------------ TIMETRACK ------------------
-@bot.command()
-async def timetrack(ctx, member: discord.Member = None):
-    """Shows online/offline, daily/weekly/monthly time with emojis"""
-    member = member or ctx.author
-    log = get_user_log(member.id)
-
-    online_time = format_duration(log.get("online_seconds", 0))
-    offline_time = format_duration(log.get("offline_seconds", 0))
-    daily_time = format_duration(log.get("daily_seconds", 0))
-    weekly_time = format_duration(log.get("weekly_seconds", 0))
-    monthly_time = format_duration(log.get("monthly_seconds", 0))
-
-    tz_lines = [
-        f"{emoji} {datetime.datetime.utcnow().replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}"
-        for emoji, tz in TIMEZONES.items()
-    ]
-
-    embed = discord.Embed(title=f"⏱️ Timetrack for {member.display_name}", color=0x00FF00)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="🟢 Online Time", value=online_time, inline=True)
-    embed.add_field(name="🔴 Offline Time", value=offline_time, inline=True)
-    embed.add_field(name="📅 Daily", value=daily_time, inline=True)
-    embed.add_field(name="📅 Weekly", value=weekly_time, inline=True)
-    embed.add_field(name="📅 Monthly", value=monthly_time, inline=True)
-    embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
-    await ctx.send(embed=embed)
-
-# ------------------ RMLB (Leaderboard) ------------------
-@bot.command()
-async def rmlb(ctx, public: bool = False):
-    """Shows leaderboard of users who used !rmute most"""
-    leaderboard = []
-    for uid, data in activity_logs.items():
-        user = ctx.guild.get_member(int(uid))
-        if user and data.get("mute_count"):
-            leaderboard.append((user.display_name, data["mute_count"]))
-    leaderboard.sort(key=lambda x: x[1], reverse=True)
-    top10 = leaderboard[:10]
-
-    desc = "\n".join([f"🏆 {i+1}. {name} → {count} mutes" for i, (name, count) in enumerate(top10)]) or "No data yet."
-    embed = discord.Embed(title="📊 !rmute Leaderboard", description=desc, color=0xFFD700)
-    
-    if public:
-        await ctx.send(embed=embed)
-    else:
-        await ctx.reply(embed=embed, mention_author=False)
-
-# ------------------ RHELP (Trigger / Command) ------------------
-@bot.command()
-async def rhelp(ctx, private: bool = False):
-    """Shows help for all commands"""
-    embed = discord.Embed(title="📜 Bot Commands", color=0x00FFFF)
-    embed.add_field(name="!rmute", value="Mute a user: !rmute [user] [duration] [reason]", inline=False)
-    embed.add_field(name="!runmute", value="Unmute a user: !runmute [user]", inline=False)
-    embed.add_field(name="!timetrack", value="Shows online/offline and daily/weekly/monthly times: !timetrack [user]", inline=False)
-    embed.add_field(name="!rmlb", value="Leaderboard of !rmute usage: !rmlb [public=False]", inline=False)
-
-    if private:
-        await ctx.reply(embed=embed, mention_author=False)
-    else:
-        await ctx.send(embed=embed)
-        # ------------------ BACKGROUND LOOPS ------------------
-
-@tasks.loop(seconds=1)
-async def track_online_time():
-    """Update online/offline seconds for all members"""
-    for guild in bot.guilds:
-        for member in guild.members:
-            log = get_user_log(member.id)
-
-            if member.status != discord.Status.offline:
-                log["online_seconds"] = log.get("online_seconds", 0) + 1
-                log["offline_seconds"] = 0
-                log["daily_seconds"] = log.get("daily_seconds", 0) + 1
-                log["weekly_seconds"] = log.get("weekly_seconds", 0) + 1
-                log["monthly_seconds"] = log.get("monthly_seconds", 0) + 1
-            else:
-                log["offline_seconds"] = log.get("offline_seconds", 0) + 1
-            save_data()
-
-@tasks.loop(seconds=10)
-async def check_mutes():
-    """Automatically unmute expired mutes"""
-    now = datetime.datetime.utcnow()
-    for guild in bot.guilds:
-        muted_role = guild.get_role(MUTED_ROLE_ID)
-        log_channel = guild.get_channel(LOG_CHANNEL_ID)
-
-        for uid, data in activity_logs.items():
-            member = guild.get_member(int(uid))
-            if not member or "mute_expires" not in data:
-                continue
-            expire_str = data["mute_expires"]
-            if expire_str:
-                expire_time = datetime.datetime.fromisoformat(expire_str)
-                if now >= expire_time:
-                    # Remove mute role & Discord timeout
-                    try:
-                        await member.remove_roles(muted_role)
-                        await member.timeout(None)
-                        try: await member.send("✅ Your mute has expired.")
-                        except: pass
-                    except: pass
-
-                    # Log
-                    embed = discord.Embed(
-                        title="⏱️ Mute Expired",
-                        description=f"{member.mention} has been automatically unmuted",
-                        color=0x00FF00,
-                        timestamp=datetime.datetime.utcnow()
-                    )
-                    embed.set_thumbnail(url=member.display_avatar.url)
-                    if log_channel:
-                        await log_channel.send(embed=embed)
-
-                    # Clear log
-                    data["mute_expires"] = None
-                    data["mute_reason"] = None
-                    data["mute_responsible"] = None
-                    save_data()
-
-# ------------------ BOT EVENTS ------------------
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
-    track_online_time.start()
-    check_mutes.start()
+last_active = {}  # stores last activity timestamp
+inactive_status = {}  # tracks if user is marked inactive
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    # Reset offline timer if user talks
-    log = get_user_log(message.author.id)
-    log["offline_seconds"] = 0
-    save_data()
+    last_active[message.author.id] = datetime.datetime.utcnow()
+    inactive_status[message.author.id] = False  # reset inactivity
     await bot.process_commands(message)
 
-# ------------------ RENDER WEB SERVER ------------------
-# This keeps the bot alive on Render
-from aiohttp import web
+@tasks.loop(seconds=10)
+async def check_inactivity():
+    now = datetime.datetime.utcnow()
+    for user_id, last_time in list(last_active.items()):
+        if (now - last_time).total_seconds() > 53:  # 53s inactivity threshold
+            if not inactive_status.get(user_id, False):
+                inactive_status[user_id] = True
+                user = bot.get_user(user_id)
+                if user:
+                    log = get_user_log(user_id)
+                    log["last_seen"] = now.isoformat()
+                    save_data()
+                    log_channel = bot.get_channel(LOG_CHANNEL_ID)
+                    if log_channel:
+                        await log_channel.send(f"⚫ {user.mention} has gone inactive (53s no activity).")
 
-async def handle(request):
-    return web.Response(text="Bot is running ✅")
+@bot.command()
+async def timetrack(ctx, member: discord.Member = None):
+    """Track how long someone has been online"""
+    member = member or ctx.author
+    log = get_user_log(member.id)
+    last_seen = log.get("last_seen")
+    if last_seen:
+        last_seen_dt = datetime.datetime.fromisoformat(last_seen)
+        duration = format_duration((datetime.datetime.utcnow() - last_seen_dt).total_seconds())
+    else:
+        duration = "No data"
+    await ctx.send(f"🕒 {member.mention} last active {duration} ago.")
+
+# ------------------ RMLB ------------------
+@bot.command()
+async def rmlb(ctx):
+    """Show leaderboard of mutes"""
+    leaderboard = []
+    for uid, data in activity_logs.items():
+        mute_count = data.get("mute_count", 0)
+        if mute_count > 0:
+            leaderboard.append((uid, mute_count))
+    leaderboard.sort(key=lambda x: x[1], reverse=True)
+
+    embed = discord.Embed(title="📊 Mute Leaderboard", color=0x3498db)
+    for i, (uid, count) in enumerate(leaderboard[:10], start=1):
+        user = bot.get_user(int(uid))
+        name = user.name if user else f"User {uid}"
+        embed.add_field(name=f"#{i} {name}", value=f"{count} mutes", inline=False)
+
+    await ctx.send(embed=embed)
+    # ------------------ AUTO UNMUTE LOOP ------------------
+@tasks.loop(seconds=30)
+async def auto_unmute():
+    """Checks muted users and unmutes if time expired"""
+    now = datetime.datetime.utcnow()
+    guild = discord.utils.get(bot.guilds)  # get first guild
+    if not guild:
+        return
+    muted_role = guild.get_role(MUTED_ROLE_ID)
+
+    for uid, log in list(activity_logs.items()):
+        mute_exp = log.get("mute_expires")
+        if mute_exp:
+            mute_time = datetime.datetime.fromisoformat(mute_exp)
+            if now >= mute_time:
+                member = guild.get_member(int(uid))
+                if member and muted_role in member.roles:
+                    try:
+                        await member.remove_roles(muted_role)
+                        await member.timeout(None)
+                        try:
+                            await member.send("🔊 You were auto-unmuted (mute expired).")
+                        except:
+                            pass
+                    except discord.Forbidden:
+                        continue
+                    log["mute_expires"] = None
+                    save_data()
+
+                    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+                    if log_channel:
+                        await log_channel.send(f"🔊 {member.mention} was auto-unmuted (mute expired).")
+
+# ------------------ WEB SERVER (Render Keep Alive) ------------------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "✅ Bot is running!"
 
 async def start_web():
-    app = web.Application()
-    app.router.add_get("/", handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 8080)))
-    await site.start()
-    print("🌐 Web server started on port", os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 8080))
+    loop = asyncio.get_event_loop()
+    server = loop.run_in_executor(None, app.run, "0.0.0.0", port)
+    return server
 
-# ------------------ START BOT ------------------
-async def main():
-    await start_web()
-    TOKEN = os.environ.get("DISCORD_TOKEN")  # Set in Render environment
-    await bot.start(TOKEN)
+# ------------------ STARTUP ------------------
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    auto_unmute.start()
+    check_inactivity.start()
 
-import asyncio
-asyncio.run(main())
+    # start web server for Render
+    asyncio.create_task(start_web())
