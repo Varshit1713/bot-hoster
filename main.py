@@ -345,7 +345,8 @@ async def cmd_rhelp(ctx: commands.Context):
 
 # ------------------ ON MESSAGE EVENT ------------------
 @bot.event
-async def on_message(message: discord.Message): if message.author.bot:
+async def on_message(message: discord.Message): 
+if message.author.bot:
         return
 
     uid = message.author.id
