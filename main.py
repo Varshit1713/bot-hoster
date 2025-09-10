@@ -13,10 +13,10 @@ if not TOKEN:
     print("❌ ERROR: DISCORD_TOKEN environment variable not set")
     exit()
 
-# Replace these IDs with your actual server info
-GUILD_ID = 123456789012345678       # Your guild/server ID
-MUTED_ROLE_ID = 987654321098765432  # Muted role ID
-LOG_CHANNEL_ID = 112233445566778899  # Log channel ID
+# Server-specific IDs
+GUILD_ID = 1403359962369097739       # Your guild/server ID
+MUTED_ROLE_ID = 1410423854563721287  # Muted role ID
+LOG_CHANNEL_ID = 1403422664521023648  # Log channel ID
 
 DATA_FILE = "activity_logs.json"
 INACTIVITY_THRESHOLD = 300  # seconds until considered offline
@@ -107,7 +107,10 @@ async def mute_check():
                 if member:
                     muted_role = guild.get_role(MUTED_ROLE_ID)
                     if muted_role in member.roles:
-                        await member.remove_roles(muted_role)
+                        try:
+                            await member.remove_roles(muted_role)
+                        except discord.Forbidden:
+                            print(f"⚠️ Missing permission to remove Muted role from {member}.")
                         await send_mute_log(member, unmuted=True)
                 log["mute_expires"] = None
                 save_data()
@@ -117,6 +120,7 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
     guild = bot.get_guild(GUILD_ID)
     log_channel = guild.get_channel(LOG_CHANNEL_ID)
     if not log_channel:
+        print("⚠️ Log channel not found or bot lacks access.")
         return
 
     embed = discord.Embed(
@@ -133,15 +137,17 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
 
-        # Calculate unmute time in all timezones
         unmute_time = datetime.datetime.utcnow() + duration
-        tz_lines = []
         unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
+        tz_lines = []
         for emoji, tz in TIMEZONES.items():
             tz_time = unmute_time.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
             tz_lines.append(f"{emoji} {tz_time}")
         embed.add_field(name="🕒 Unmute Time", value="\n".join(tz_lines), inline=False)
-    await log_channel.send(embed=embed)
+    try:
+        await log_channel.send(embed=embed)
+    except discord.Forbidden:
+        print(f"⚠️ Cannot send embed in log channel for {member}.")
 
 # ------------------ SLASH COMMANDS ------------------
 @bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
@@ -176,10 +182,13 @@ async def mute(interaction: discord.Interaction, member: discord.Member, duratio
         return
 
     # Assign role
-    await member.add_roles(muted_role)
-    delta = datetime.timedelta(minutes=duration)
+    try:
+        await member.add_roles(muted_role)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"⚠️ Missing permission to assign Muted role to {member}.", ephemeral=True)
+        return
 
-    # Store mute expiration
+    delta = datetime.timedelta(minutes=duration)
     log = get_user_log(member.id)
     log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()
     save_data()
@@ -193,7 +202,11 @@ async def unmute(interaction: discord.Interaction, member: discord.Member):
     guild = interaction.guild
     muted_role = guild.get_role(MUTED_ROLE_ID)
     if muted_role in member.roles:
-        await member.remove_roles(muted_role)
+        try:
+            await member.remove_roles(muted_role)
+        except discord.Forbidden:
+            await interaction.response.send_message(f"⚠️ Missing permission to remove Muted role from {member}.", ephemeral=True)
+            return
         log = get_user_log(member.id)
         log["mute_expires"] = None
         save_data()
