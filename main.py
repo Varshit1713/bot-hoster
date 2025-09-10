@@ -1,7 +1,6 @@
 # ------------------ IMPORTS ------------------
 import os
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 import datetime
 import json
@@ -89,9 +88,6 @@ def format_duration(seconds):
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
-    guild = discord.Object(id=GUILD_ID)
-    bot.tree.copy_global_to(guild=guild)
-    await bot.tree.sync(guild=guild)
     timetrack_update.start()
     mute_check.start()
 
@@ -126,6 +122,7 @@ async def timetrack_update():
                 log["online_seconds"] += 5
                 log["offline_start"] = None
                 log["offline_seconds"] = 0
+
         # Daily / Weekly / Monthly resets
         today = datetime.datetime.utcnow().date()
         weekday = today.isocalendar()[1]
@@ -187,21 +184,28 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         embed.add_field(name="📝 Reason", value=reason, inline=False)
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
+        unmute_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(duration.split('D')[0])*86400 + int(duration.split('D')[1].split('H')[0])*3600)
+        unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
+        tz_lines = [f"{emoji} {unmute_time.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
+        embed.add_field(name="🕒 Unmute Time", value="\n".join(tz_lines), inline=False)
     if unmuted and log:
         embed.add_field(name="📝 Original Reason", value=log.get("mute_reason", "N/A"), inline=False)
-    tz_lines = [f"{emoji} {datetime.datetime.utcnow().replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
-    embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
-
     try:
         await log_channel.send(embed=embed)
-    except Exception as e:
-        print(f"⚠️ Failed to send mute log: {e}")
 
-# ------------------ SLASH COMMANDS ------------------
-@bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
-@app_commands.describe(member="Member to check timetrack for")
-async def timetrack(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
+# ------------------ TEXT TRIGGERS ------------------
+@bot.command(name="rhelp")
+async def rhelp(ctx):
+    embed = discord.Embed(title="📖 Bot Trigger Help", color=0x00FF00)
+    embed.add_field(name="!rmute", value="!rmute @user <duration_minutes> <reason>", inline=False)
+    embed.add_field(name="!runmute", value="!runmute @user", inline=False)
+    embed.add_field(name="!timetrack", value="!timetrack [optional @user]", inline=False)
+    embed.set_footer(text="Example: !rmute @User 60 Spamming")
+    await ctx.send(embed=embed)
+
+@bot.command(name="timetrack")
+async def timetrack_cmd(ctx, member: discord.Member = None):
+    member = member or ctx.author
     log = get_user_log(member.id)
 
     online_time = format_duration(log.get("online_seconds", 0))
@@ -216,65 +220,124 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member = N
     ]
 
     embed = discord.Embed(title=f"⏱️ Timetrack for {member.display_name}", color=0x00FF00)
+    embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🟢 Online Time", value=online_time, inline=True)
     embed.add_field(name="🔴 Offline Time", value=offline_time, inline=True)
-    embed.add_field(name="Daily", value=daily_time, inline=True)
-    embed.add_field(name="Weekly", value=weekly_time, inline=True)
-    embed.add_field(name="Monthly", value=monthly_time, inline=True)
+    embed.add_field(name="📅 Daily", value=daily_time, inline=True)
+    embed.add_field(name="🗓️ Weekly", value=weekly_time, inline=True)
+    embed.add_field(name="🕰️ Monthly", value=monthly_time, inline=True)
     embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
+    await ctx.send(embed=embed)
 
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="rmute", description="Mute a member with duration in minutes and reason")
-@app_commands.describe(member="Member to mute", duration="Duration in minutes", reason="Reason for mute")
-async def rmute(interaction: discord.Interaction, member: discord.Member, duration: int, reason: str):
-    guild = interaction.guild
-    muted_role = guild.get_role(MUTED_ROLE_ID)
+@bot.command(name="rmute")
+@commands.has_permissions(manage_roles=True, moderate_members=True)
+async def rmute_cmd(ctx, member: discord.Member, duration: int, *, reason: str = "No reason provided"):
+    """Mute a user: adds muted role, applies discord timeout, logs the mute and schedules unmute."""
+    muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
     if not muted_role:
-        await interaction.response.send_message("Muted role not found.", ephemeral=True)
+        await ctx.send("❌ Muted role not found on this server.")
         return
 
+    # Try to add role
     try:
-        await member.add_roles(muted_role)
+        await member.add_roles(muted_role, reason=f"Muted by {ctx.author} — {reason}")
     except discord.Forbidden:
-        await interaction.response.send_message(f"⚠️ Missing permission to add Muted role to {member}.", ephemeral=True)
+        await ctx.send("⚠️ I don't have permission to add the muted role.")
+        return
+    except Exception as e:
+        await ctx.send(f"⚠️ Failed to add muted role: {e}")
         return
 
+    # Apply Discord timeout (member.edit)
     delta = datetime.timedelta(minutes=duration)
+    try:
+        # timeout_until expects a datetime or None
+        timeout_until = datetime.datetime.utcnow() + delta
+        await member.edit(timeout=timeout_until, reason=f"Muted by {ctx.author} — {reason}")
+    except discord.Forbidden:
+        # If we can't timeout, continue — role is still applied
+        await ctx.send("⚠️ Could not apply Discord timeout but role was added. Check permissions.")
+    except Exception:
+        # Ignore other edit errors but continue
+        pass
+
+    # Save mute info to storage
     log = get_user_log(member.id)
     log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()
     log["mute_reason"] = reason
-    log["mute_responsible"] = interaction.user.id
+    log["mute_responsible"] = ctx.author.id
     save_data()
 
-    await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
-    await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
+    # Log to the designated log channel
+    await send_mute_log(member, reason=reason, responsible=ctx.author, duration=format_duration(delta.total_seconds()))
 
-@bot.tree.command(name="runmute", description="Unmute a member manually")
-@app_commands.describe(member="Member to unmute")
-async def runmute(interaction: discord.Interaction, member: discord.Member):
-    guild = interaction.guild
-    muted_role = guild.get_role(MUTED_ROLE_ID)
-    log = get_user_log(member.id)
+    # Reply in channel
+    await ctx.send(f"✅ {member.mention} has been muted for {duration} minute(s). Reason: {reason}")
 
-    if muted_role in member.roles:
-        try:
-            await member.remove_roles(muted_role)
-        except discord.Forbidden:
-            await interaction.response.send_message(f"⚠️ Missing permission to remove Muted role from {member}.", ephemeral=True)
-            return
-
-        await send_mute_log(member, unmuted=True, log=log)
-        log["mute_expires"] = None
-        log["mute_reason"] = None
-        log["mute_responsible"] = None
-        save_data()
-        await interaction.response.send_message(f"✅ {member.mention} has been unmuted by {interaction.user.mention}.")
+@rmute_cmd.error
+async def rmute_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("❌ Bad arguments. Usage: `!rmute @user <duration_minutes> <reason>`")
     else:
-        await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
+        await ctx.send(f"❌ Error: {error}")
 
-# ------------------ RUN BOT ------------------
-# Start Flask web server in the background
-threading.Thread(target=run_web).start()
+@bot.command(name="runmute")
+@commands.has_permissions(manage_roles=True, moderate_members=True)
+async def runmute_cmd(ctx, member: discord.Member):
+    """Unmute a user: removes muted role, clears Discord timeout, and logs the unmute."""
+    muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
+    if not muted_role:
+        await ctx.send("❌ Muted role not found on this server.")
+        return
 
+    if muted_role not in member.roles:
+        await ctx.send(f"ℹ️ {member.mention} is not muted.")
+        return
+
+    # Remove the role
+    try:
+        await member.remove_roles(muted_role, reason=f"Unmuted by {ctx.author}")
+    except discord.Forbidden:
+        await ctx.send("⚠️ I don't have permission to remove the muted role.")
+        return
+    except Exception as e:
+        await ctx.send(f"⚠️ Failed to remove muted role: {e}")
+        return
+
+    # Clear Discord timeout
+    try:
+        await member.edit(timeout=None, reason=f"Unmuted by {ctx.author}")
+    except discord.Forbidden:
+        # If can't remove timeout, continue
+        await ctx.send("⚠️ Could not clear Discord timeout but role was removed. Check permissions.")
+    except Exception:
+        pass
+
+    # Fetch log info for embed
+    log = get_user_log(member.id)
+    # Send unmute log
+    await send_mute_log(member, unmuted=True, log=log, responsible=ctx.author)
+
+    # Clear stored mute info
+    log["mute_expires"] = None
+    log["mute_reason"] = None
+    log["mute_responsible"] = None
+    save_data()
+
+    await ctx.send(f"✅ {member.mention} has been unmuted by {ctx.author.mention}.")
+
+@runmute_cmd.error
+async def runmute_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You don't have permission to use this command.")
+    else:
+        await ctx.send(f"❌ Error: {error}")
+
+# ------------------ START UP ------------------
+# Start Flask web server in background (daemon so it doesn't block exit)
+threading.Thread(target=run_web, daemon=True).start()
+
+# Run the bot
 bot.run(TOKEN)
