@@ -67,34 +67,11 @@ def format_duration(seconds):
     mins, sec = divmod(rem, 60)
     return f"{days}D {hrs}H {mins}M {sec}S"
 
-# ------------------ EVENTS ------------------
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    guild = discord.Object(id=GUILD_ID)
-    bot.tree.copy_global_to(guild=guild)
-    await bot.tree.sync(guild=guild)
-    timetrack_update.start()
-    mute_check.start()
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    log = get_user_log(message.author.id)
-    log["offline_seconds"] = 0
-    log["offline_start"] = None
-    log["offline_delay"] = None
-    log["last_message"] = datetime.datetime.utcnow().isoformat()
-    save_data()
-    await bot.process_commands(message)
-    # ------------------ BACKGROUND TASKS ------------------
+# ------------------ BACKGROUND TASKS ------------------
 @tasks.loop(seconds=5)
 async def timetrack_update():
     now = datetime.datetime.utcnow()
     for uid, log in activity_logs.items():
-        # Offline timer logic with random delay
         if log.get("offline_start"):
             delta = (now - datetime.datetime.fromisoformat(log["offline_start"])).total_seconds()
             log["offline_seconds"] = delta
@@ -126,7 +103,6 @@ async def mute_check():
                         except discord.Forbidden:
                             print(f"⚠️ Missing permission to remove Muted role from {member}.")
                         await send_mute_log(member, unmuted=True, log=log)
-                # Clear mute info after automatic unmute
                 log["mute_expires"] = None
                 log["mute_reason"] = None
                 log["mute_responsible"] = None
@@ -154,7 +130,6 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
 
-        # Show unmute time in 4 timezones
         unmute_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(duration.split('D')[0])*86400 + int(duration.split('D')[1].split('H')[0])*3600)
         unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
         tz_lines = []
@@ -177,7 +152,33 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         await log_channel.send(embed=embed)
     except discord.Forbidden:
         print(f"⚠️ Cannot send embed in log channel for {member}.")
-        # ------------------ SLASH COMMANDS ------------------
+        # ------------------ EVENTS ------------------
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    guild = discord.Object(id=GUILD_ID)
+    bot.tree.copy_global_to(guild=guild)
+    await bot.tree.sync(guild=guild)
+    timetrack_update.start()
+    mute_check.start()
+
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    log = get_user_log(message.author.id)
+    log["offline_seconds"] = 0
+    log["offline_start"] = None
+    log["offline_delay"] = None
+    log["last_message"] = datetime.datetime.utcnow().isoformat()
+    save_data()
+
+    await bot.process_commands(message)
+
+
+# ------------------ SLASH COMMANDS ------------------
 @bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
 @app_commands.describe(member="Member to check timetrack for")
 async def timetrack(interaction: discord.Interaction, member: discord.Member = None):
@@ -199,6 +200,7 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member = N
     embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
 
     await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="rmute", description="Mute a member with duration and reason")
 @app_commands.describe(member="Member to mute", duration="Duration in minutes", reason="Reason for mute")
@@ -225,6 +227,7 @@ async def rmute(interaction: discord.Interaction, member: discord.Member, durati
     await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
     await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
 
+
 @bot.tree.command(name="runmute", description="Unmute a member manually")
 @app_commands.describe(member="Member to unmute")
 async def runmute(interaction: discord.Interaction, member: discord.Member):
@@ -249,6 +252,7 @@ async def runmute(interaction: discord.Interaction, member: discord.Member):
         await interaction.response.send_message(f"✅ {member.mention} has been unmuted.")
     else:
         await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
+
 
 # ------------------ RUN BOT ------------------
 bot.run(TOKEN)
