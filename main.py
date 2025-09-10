@@ -5,7 +5,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 import datetime
 import json
-import pytz
+from zoneinfo import ZoneInfo  # Built-in timezone support
 
 # ------------------ CONFIG ------------------
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -22,10 +22,10 @@ DATA_FILE = "activity_logs.json"
 INACTIVITY_THRESHOLD = 300  # seconds until considered offline
 
 TIMEZONES = {
-    "🌎 UTC": pytz.UTC,
-    "🇺🇸 EST": pytz.timezone("US/Eastern"),
-    "🇬🇧 GMT": pytz.timezone("Europe/London"),
-    "🇯🇵 JST": pytz.timezone("Asia/Tokyo")
+    "🌎 UTC": ZoneInfo("UTC"),
+    "🇺🇸 EST": ZoneInfo("America/New_York"),
+    "🇬🇧 GMT": ZoneInfo("Europe/London"),
+    "🇯🇵 JST": ZoneInfo("Asia/Tokyo")
 }
 
 intents = discord.Intents.default()
@@ -136,7 +136,7 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         # Calculate unmute time in all timezones
         unmute_time = datetime.datetime.utcnow() + duration
         tz_lines = []
-        unmute_time = unmute_time.replace(tzinfo=pytz.UTC)
+        unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
         for emoji, tz in TIMEZONES.items():
             tz_time = unmute_time.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
             tz_lines.append(f"{emoji} {tz_time}")
@@ -154,7 +154,7 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member = N
     offline_time = format_duration(log.get("offline_seconds", 0))
 
     tz_lines = []
-    utc_now = datetime.datetime.utcnow().replace(tzinfo=pytz.UTC)
+    utc_now = datetime.datetime.utcnow().replace(tzinfo=ZoneInfo("UTC"))
     for emoji, tz in TIMEZONES.items():
         tz_time = utc_now.astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
         tz_lines.append(f"{emoji} {tz_time}")
