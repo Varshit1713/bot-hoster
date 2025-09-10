@@ -70,9 +70,9 @@ def get_user_log(user_id):
             "mute_expires": None,
             "mute_reason": None,
             "mute_responsible": None,
-            "daily": 0,
-            "weekly": 0,
-            "monthly": 0,
+            "daily_seconds": 0,
+            "weekly_seconds": 0,
+            "monthly_seconds": 0,
             "daily_reset": None,
             "weekly_reset": None,
             "monthly_reset": None
@@ -100,10 +100,11 @@ async def on_message(message):
     if message.author.bot:
         return
     log = get_user_log(message.author.id)
-    log["offline_seconds"] = 0
+    now = datetime.datetime.utcnow()
+    log["last_message"] = now.isoformat()
+    # Reset offline tracking
     log["offline_start"] = None
     log["offline_delay"] = None
-    log["last_message"] = datetime.datetime.utcnow().isoformat()
     save_data()
     await bot.process_commands(message)
 
@@ -112,44 +113,35 @@ async def on_message(message):
 async def timetrack_update():
     now = datetime.datetime.utcnow()
     for uid, log in activity_logs.items():
-        last_msg = log.get("last_message")
-        offline_start = log.get("offline_start")
-        offline_delay = log.get("offline_delay")
-
-        if last_msg:
-            last_msg_time = datetime.datetime.fromisoformat(last_msg)
-            if not offline_delay:
+        last_msg_iso = log.get("last_message")
+        if last_msg_iso:
+            last_msg_time = datetime.datetime.fromisoformat(last_msg_iso)
+            if not log.get("offline_delay"):
                 log["offline_delay"] = random.randint(INACTIVITY_THRESHOLD_MIN, INACTIVITY_THRESHOLD_MAX)
-                offline_delay = log["offline_delay"]
-
-            if (now - last_msg_time).total_seconds() >= offline_delay:
-                if not offline_start:
-                    log["offline_start"] = last_msg_time + datetime.timedelta(seconds=offline_delay)
-                    offline_start = log["offline_start"]
-
-        if not offline_start:
-            log["online_seconds"] += 5
-            log["daily"] += 5
-            log["weekly"] += 5
-            log["monthly"] += 5
-        else:
-            offline_elapsed = (now - datetime.datetime.fromisoformat(offline_start)).total_seconds()
-            log["offline_seconds"] = offline_elapsed
-
-        # Reset daily/weekly/monthly
-        if not log.get("daily_reset") or now >= datetime.datetime.fromisoformat(log["daily_reset"]):
-            log["daily"] = 0
-            next_day = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0) + datetime.timedelta(days=1)
-            log["daily_reset"] = next_day.isoformat()
-        if not log.get("weekly_reset") or now >= datetime.datetime.fromisoformat(log["weekly_reset"]):
-            log["weekly"] = 0
-            next_week = datetime.datetime.utcnow() + datetime.timedelta(days=(7 - datetime.datetime.utcnow().weekday()))
-            log["weekly_reset"] = next_week.isoformat()
-        if not log.get("monthly_reset") or now >= datetime.datetime.fromisoformat(log["monthly_reset"]):
-            log["monthly"] = 0
-            next_month = (datetime.datetime.utcnow().replace(day=1) + datetime.timedelta(days=32)).replace(day=1)
-            log["monthly_reset"] = next_month.isoformat()
-
+            inactive_time = (now - last_msg_time).total_seconds()
+            # Online accumulation
+            if inactive_time < log["offline_delay"]:
+                log["online_seconds"] += 5
+                log["offline_start"] = None
+            else:
+                # Start offline timer
+                if not log.get("offline_start"):
+                    log["offline_start"] = last_msg_time + datetime.timedelta(seconds=log["offline_delay"])
+                log["offline_seconds"] = (now - log["offline_start"]).total_seconds()
+        # Daily/weekly/monthly resets
+        for period, seconds_key, reset_key, duration in [
+            ("daily", "daily_seconds", "daily_reset", 86400),
+            ("weekly", "weekly_seconds", "weekly_reset", 604800),
+            ("monthly", "monthly_seconds", "monthly_reset", 2592000)
+        ]:
+            if log.get(reset_key) is None:
+                log[reset_key] = now.isoformat()
+            else:
+                reset_time = datetime.datetime.fromisoformat(log[reset_key])
+                if (now - reset_time).total_seconds() >= duration:
+                    log[seconds_key] = 0
+                    log[reset_key] = now.isoformat()
+            log[seconds_key] += 5 if inactive_time < log["offline_delay"] else 0
     save_data()
 
 @tasks.loop(seconds=5)
@@ -159,29 +151,29 @@ async def mute_check():
         if log.get("mute_expires"):
             expires = datetime.datetime.fromisoformat(log["mute_expires"])
             if now >= expires:
-                guild = bot.get_guild(GUILD_ID)
-                member = guild.get_member(int(uid))
+                guild_obj = bot.get_guild(GUILD_ID)
+                member = guild_obj.get_member(int(uid))
                 if member:
-                    muted_role = guild.get_role(MUTED_ROLE_ID)
+                    muted_role = guild_obj.get_role(MUTED_ROLE_ID)
                     if muted_role in member.roles:
                         try:
                             await member.remove_roles(muted_role)
                         except discord.Forbidden:
                             print(f"⚠️ Missing permission to remove Muted role from {member}.")
                         await send_mute_log(member, unmuted=True, log=log)
+                # Clear mute info
                 log["mute_expires"] = None
                 log["mute_reason"] = None
                 log["mute_responsible"] = None
-                save_data()
+    save_data()
 
 # ------------------ EMBED HELPERS ------------------
 async def send_mute_log(member, reason=None, responsible=None, duration=None, unmuted=False, log=None):
-    guild = bot.get_guild(GUILD_ID)
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
+    guild_obj = bot.get_guild(GUILD_ID)
+    log_channel = guild_obj.get_channel(LOG_CHANNEL_ID)
     if not log_channel:
-        print("⚠️ Log channel not found or bot lacks access.")
+        print("⚠️ Log channel not found.")
         return
-
     embed = discord.Embed(
         title="🔒 Mute Log" if not unmuted else "✅ Unmute Log",
         color=0xFF0000 if not unmuted else 0x00FF00,
@@ -195,14 +187,19 @@ async def send_mute_log(member, reason=None, responsible=None, duration=None, un
         embed.add_field(name="📝 Reason", value=reason, inline=False)
     if duration and not unmuted:
         embed.add_field(name="⏳ Duration", value=duration, inline=True)
-        unmute_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=int(duration.split('D')[0])*86400 + int(duration.split('D')[1].split('H')[0])*3600)
-        unmute_time = unmute_time.replace(tzinfo=ZoneInfo("UTC"))
-        tz_lines = [f"{emoji} {unmute_time.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
-        embed.add_field(name="🕒 Unmute Time", value="\n".join(tz_lines), inline=False)
     if unmuted and log:
         embed.add_field(name="📝 Original Reason", value=log.get("mute_reason", "N/A"), inline=False)
+        if log.get("mute_expires") and log.get("last_message"):
+            start_time = datetime.datetime.fromisoformat(log.get("last_message"))
+            end_time = datetime.datetime.fromisoformat(log.get("mute_expires"))
+            orig_duration = end_time - start_time
+            embed.add_field(name="⏳ Original Duration", value=format_duration(orig_duration.total_seconds()), inline=True)
+        if responsible:
+            embed.add_field(name="👤 Unmuted by", value=responsible.mention, inline=True)
     try:
         await log_channel.send(embed=embed)
+    except discord.Forbidden:
+        print(f"⚠️ Cannot send embed in log channel for {member}.")
 
 # ------------------ SLASH COMMANDS ------------------
 @bot.tree.command(name="timetrack", description="Shows online/offline time and timezones")
@@ -212,35 +209,32 @@ async def timetrack(interaction: discord.Interaction, member: discord.Member = N
     log = get_user_log(member.id)
     online_time = format_duration(log.get("online_seconds", 0))
     offline_time = format_duration(log.get("offline_seconds", 0))
-    daily_time = format_duration(log.get("daily", 0))
-    weekly_time = format_duration(log.get("weekly", 0))
-    monthly_time = format_duration(log.get("monthly", 0))
+    daily_time = format_duration(log.get("daily_seconds", log.get("online_seconds", 0)))
+    weekly_time = format_duration(log.get("weekly_seconds", log.get("online_seconds", 0)))
+    monthly_time = format_duration(log.get("monthly_seconds", log.get("online_seconds", 0)))
     tz_lines = [f"{emoji} {datetime.datetime.utcnow().replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
-
     embed = discord.Embed(title=f"⏱️ Timetrack for {member.display_name}", color=0x00FF00)
-    embed.add_field(name="🟢 Online", value=online_time, inline=True)
-    embed.add_field(name="🔴 Offline", value=offline_time, inline=True)
+    embed.add_field(name="🟢 Online Time", value=online_time, inline=True)
+    embed.add_field(name="🔴 Offline Time", value=offline_time, inline=True)
     embed.add_field(name="📅 Daily", value=daily_time, inline=True)
-    embed.add_field(name="📆 Weekly", value=weekly_time, inline=True)
+    embed.add_field(name="📅 Weekly", value=weekly_time, inline=True)
     embed.add_field(name="🗓️ Monthly", value=monthly_time, inline=True)
     embed.add_field(name="🕒 Timezones", value="\n".join(tz_lines), inline=False)
     await interaction.response.send_message(embed=embed)
 
-# ------------------ MUTE COMMANDS ------------------
-@bot.tree.command(name="rmute", description="Mute a member with duration in minutes")
+# ------------------ MUTE/UNMUTE ------------------
+@bot.tree.command(name="rmute", description="Mute a member with duration and reason")
 @app_commands.describe(member="Member to mute", duration="Duration in minutes", reason="Reason for mute")
 async def rmute(interaction: discord.Interaction, member: discord.Member, duration: int, reason: str):
-    guild = interaction.guild
-    muted_role = guild.get_role(MUTED_ROLE_ID)
-    if not muted_role:
-        await interaction.response.send_message("Muted role not found.", ephemeral=True)
+    guild_obj = interaction.guild
+    muted_role = guild_obj.get_role(MUTED_ROLE_ID)
+    if not muted_role:await interaction.response.send_message("Muted role not found.", ephemeral=True)
         return
     try:
-        await member.add_roles(muted_role)
+        await member.add_roles(muted_role, reason=reason)
     except discord.Forbidden:
         await interaction.response.send_message(f"⚠️ Missing permission to add Muted role to {member}.", ephemeral=True)
         return
-
     delta = datetime.timedelta(minutes=duration)
     log = get_user_log(member.id)
     log["mute_expires"] = (datetime.datetime.utcnow() + delta).isoformat()
@@ -248,29 +242,32 @@ async def rmute(interaction: discord.Interaction, member: discord.Member, durati
     log["mute_responsible"] = interaction.user.id
     save_data()
     await send_mute_log(member, reason=reason, responsible=interaction.user, duration=format_duration(delta.total_seconds()))
-    await interaction.response.send_message(f"✅ {member.mention} muted for {duration} minutes.")
+    await interaction.response.send_message(f"✅ {member.mention} has been muted for {duration} minutes.")
 
 @bot.tree.command(name="runmute", description="Unmute a member manually")
 @app_commands.describe(member="Member to unmute")
 async def runmute(interaction: discord.Interaction, member: discord.Member):
-    guild = interaction.guild
-    muted_role = guild.get_role(MUTED_ROLE_ID)
+    guild_obj = interaction.guild
+    muted_role = guild_obj.get_role(MUTED_ROLE_ID)
     log = get_user_log(member.id)
     if muted_role in member.roles:
         try:
-            await member.remove_roles(muted_role)
+            await member.remove_roles(muted_role, reason=f"Unmuted by {interaction.user}")
         except discord.Forbidden:
             await interaction.response.send_message(f"⚠️ Missing permission to remove Muted role from {member}.", ephemeral=True)
             return
-        await send_mute_log(member, unmuted=True, log=log)
+        # Clear mute info
         log["mute_expires"] = None
         log["mute_reason"] = None
-        log["mute_responsible"] = None
+        log["mute_responsible"] = interaction.user.id
         save_data()
-        await interaction.response.send_message(f"✅ {member.mention} has been unmuted by {interaction.user.mention}.")
+        await send_mute_log(member, unmuted=True, log=log, responsible=interaction.user)
+        await interaction.response.send_message(f"✅ {member.mention} has been unmuted.")
     else:
         await interaction.response.send_message(f"ℹ️ {member.mention} is not muted.", ephemeral=True)
 
 # ------------------ RUN BOT ------------------
+# Start Flask web server in background
 threading.Thread(target=run_web).start()
+
 bot.run(TOKEN)
