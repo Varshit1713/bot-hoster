@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from typing import Optional
 
 import discord
-from discord.ext import commands, tasks
+from discord.ext import commands
 from flask import Flask
 
 # ------------------ CONFIG ------------------
@@ -84,7 +84,7 @@ def get_user_log(user_id: int):
             "inactive": False,
             "mute_count": 0,
             "last_mute_at": None,
-            "user_ping_enabled": True  # NEW: ping preference for offline/online notifications
+            "user_ping_enabled": True
         }
     return activity_logs[uid]
 
@@ -125,7 +125,7 @@ def build_mute_embed(member: discord.Member, by: discord.Member, reason: str, du
     )
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="👤 Muted User", value=member.mention, inline=True)
-    embed.add_field(name="🔒 Muted By", value="Anonymous", inline=True)  # anonymized
+    embed.add_field(name="🔒 Muted By", value="Anonymous", inline=True)
     embed.add_field(name="⏳ Duration", value=fmt_duration(duration_seconds), inline=True)
     embed.add_field(name="📝 Reason", value=reason or "No reason provided", inline=False)
     tz_lines = [f"{emoji} {expire_dt.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
@@ -150,7 +150,8 @@ def build_unmute_embed(member: discord.Member, by: discord.Member, original_reas
     tz_lines = [f"{emoji} {now.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')}" for emoji, tz in TIMEZONES.items()]
     embed.add_field(name="🕒 Unmuted At (timezones)", value="\n".join(tz_lines), inline=False)
     return embed
-    # ------------------ COMMANDS ------------------
+
+# ------------------ COMMANDS ------------------
 
 @bot.command(name="rmute")
 @commands.has_permissions(moderate_members=True)
@@ -265,10 +266,6 @@ async def cmd_runmute(ctx: commands.Context, member: discord.Member):
 # ------------------ RPING COMMAND ------------------
 @bot.command(name="rping")
 async def cmd_rping(ctx: commands.Context, toggle: str, member: discord.Member = None):
-    """
-    !rping [on/off] [user] — toggle ping notifications for inactive/active messages.
-    Only allowed for users with ACTIVE_LOG_ROLE_IDS.
-    """
     member = member or ctx.author
     if not any(rid in [r.id for r in ctx.author.roles] for rid in ACTIVE_LOG_ROLE_IDS):
         return await ctx.reply("❌ You don't have permission to use this command.", mention_author=False)
@@ -345,8 +342,8 @@ async def cmd_rhelp(ctx: commands.Context):
 
 # ------------------ ON MESSAGE EVENT ------------------
 @bot.event
-async def on_message(message: discord.Message): 
-if message.author.bot:
+async def on_message(message: discord.Message):
+    if message.author.bot:
         return
 
     uid = message.author.id
@@ -410,5 +407,89 @@ if message.author.bot:
     user_log["inactive"] = False
     await save_data_async()
 
+    # process commands
     await bot.process_commands(message)
-    
+
+# ------------------ AUTO UNMUTE TASK ------------------
+@bot.event
+async def on_ready():
+    print(f"Bot logged in as {bot.user}")
+    auto_unmute.start()  # start background task
+
+@tasks.loop(seconds=10)
+async def auto_unmute():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for uid, log in activity_logs.items():
+        mute_exp = log.get("mute_expires")
+        if mute_exp:
+            try:
+                expire_dt = datetime.datetime.fromisoformat(mute_exp)
+                if now >= expire_dt:
+                    guild = bot.get_guild(GUILD_ID)
+                    if guild:
+                        member = guild.get_member(int(uid))
+                        muted_role = guild.get_role(MUTED_ROLE_ID)
+                        if member and muted_role and muted_role in member.roles:
+                            try:
+                                await member.remove_roles(muted_role, reason="Auto-unmute expired")
+                                try:
+                                    await member.timeout(None, reason="Auto-unmute expired")
+                                except Exception:
+                                    pass
+                                log["mute_expires"] = None
+                                log["mute_reason"] = None
+                                log["mute_responsible"] = None
+
+                                embed = build_unmute_embed(member, bot.user, None, None)
+                                log_channel = guild.get_channel(LOG_CHANNEL_ID)
+                                if log_channel:
+                                    try:
+                                        await log_channel.send(embed=embed)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+            except Exception:
+                continue
+    await save_data_async()
+
+# ------------------ OFFLINE COUNTER TASK ------------------
+@tasks.loop(seconds=60)
+async def offline_counter_tick():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for uid, log in activity_logs.items():
+        last_msg = log.get("last_message")
+        if last_msg:
+            try:
+                last_dt = datetime.datetime.fromisoformat(last_msg)
+                diff = (now - last_dt).total_seconds()
+                delay = log.get("offline_delay", 60)
+                if diff > delay:
+                    log["offline_seconds"] = log.get("offline_seconds", 0) + 60
+                    log["inactive"] = True
+            except Exception:
+                continue
+    await save_data_async()
+
+offline_counter_tick.start()
+
+# ------------------ FLASK KEEP-ALIVE ------------------
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is alive!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+# ------------------ START BOT ------------------
+if __name__ == "__main__":
+    load_data()
+    import threading
+    threading.Thread(target=run_flask).start()
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if not TOKEN:
+        print("❌ ERROR: DISCORD_TOKEN not set")
+    else:
+        bot.run(TOKEN)
