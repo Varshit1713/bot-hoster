@@ -151,51 +151,40 @@ def build_unmute_embed(member: discord.Member, by: discord.Member, original_reas
     return embed
 
 # ------------------ COMMANDS ------------------
-@bot.command(name="rmute")
+@bot.command()
 @commands.has_permissions(manage_roles=True)
-async def rmute(ctx: commands.Context, member: discord.Member, duration: str, *, reason: Optional[str] = None):
-    """Mute a member for a specific duration. Example: !rmute @User 10m spamming"""
-    # delete the command message for anonymity
-    try:
-        await ctx.message.delete()
-    except Exception:
-        pass
-
-    # parse duration
+async def rmute(ctx, member: discord.Member, duration: str, *, reason: Optional[str] = None):
+    # Convert duration like "10s", "5m", "2h" to seconds
     duration_seconds = parse_duration_abbrev(duration)
     if duration_seconds is None:
-        await ctx.send("❌ Invalid duration format! Use something like 10s, 5m, 2h, 1d.", delete_after=10)
+        await ctx.send("❌ Invalid duration. Use 10s, 5m, 1h, 2d etc.", delete_after=5)
         return
 
-    guild = ctx.guild
-    muted_role = guild.get_role(MUTED_ROLE_ID)
+    muted_role = ctx.guild.get_role(MUTED_ROLE_ID)
     if not muted_role:
-        await ctx.send("❌ Muted role not found in the server!", delete_after=10)
+        await ctx.send("❌ Muted role not found.", delete_after=5)
         return
 
-    # add muted role
     try:
-        await member.add_roles(muted_role, reason=reason or "No reason provided")
+        await member.add_roles(muted_role, reason=reason)
+        expire_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=duration_seconds)
+        log = get_user_log(member.id)
+        log["mute_expires"] = expire_time.isoformat()
+        log["mute_reason"] = reason
+        log["mute_responsible"] = ctx.author.id
+        await save_data_async()
+
+        log_channel = ctx.guild.get_channel(LOG_CHANNEL_ID)
+        if log_channel:
+            embed = build_mute_embed(member, ctx.author, reason, duration_seconds)
+            await log_channel.send(embed=embed)
+
+        # Delete the original command message
+        await ctx.message.delete()
+        await ctx.send(f"✅ {member.mention} has been muted.", delete_after=5)
+
     except Exception as e:
-        await ctx.send(f"❌ Failed to add muted role: {e}", delete_after=10)
-        return
-
-    # set mute info in logs
-    user_log = get_user_log(member.id)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    expire_dt = now + datetime.timedelta(seconds=duration_seconds)
-    user_log["mute_expires"] = expire_dt.isoformat()
-    user_log["mute_reason"] = reason
-    user_log["mute_responsible"] = ctx.author.id
-    user_log["last_mute_at"] = now.isoformat()
-    user_log["mute_count"] = user_log.get("mute_count", 0) + 1
-    await save_data_async()
-
-    # send anonymous embed
-    log_channel = guild.get_channel(LOG_CHANNEL_ID)
-    if log_channel:
-        embed = build_mute_embed(member, ctx.author, reason or "No reason provided", duration_seconds)
-        await log_channel.send(embed=embed)
+        await ctx.send(f"❌ Failed to mute: {e}", delete_after=5)
 
 # ------------------ ON MESSAGE EVENT ------------------
 @bot.event
@@ -298,7 +287,7 @@ async def auto_unmute():
 
 # ------------------ STARTUP ------------------
 load_data()
-auto_unmute.start()
+asyncio.get_event_loop().create_task(auto_unmute())  # Start auto-unmute in event loop
 
 # ------------------ RENDER KEEPALIVE ------------------
 app = Flask("")
