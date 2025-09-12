@@ -1,5 +1,5 @@
 # main.py
-# Full merged bot: timetrack + rmute + comprehensive logging + attachment caching + auto-unmute + activity ping
+# Full merged bot: timetrack + rmute + comprehensive logging + attachment caching + auto-unmute + activity ping + DM critical-role users
 # Requirements: discord.py 2.x, aiohttp, Python 3.9+
 
 import os
@@ -16,25 +16,32 @@ import discord
 from discord.ext import commands, tasks
 from flask import Flask
 
-# ------------------ CONFIG ------------------
-# Replace with your guild / channel / role IDs (these are the ones you provided)
+# ------------------ CONFIG (edit these if needed) ------------------
+# IDs you provided
 GUILD_ID = 1403359962369097739
 MUTED_ROLE_ID = 1410423854563721287
-MOD_ACTIVITY_LOG_CHANNEL = 1403422664521023648   # where mod online/offline messages go (you provided)
-LOGGING_CHANNEL_ID = 1410458084874260592        # main audit/log channel (you provided)
+MOD_ACTIVITY_LOG_CHANNEL = 1403422664521023648   # mod online/offline channel
+LOGGING_CHANNEL_ID = 1410458084874260592        # main audit/log channel
 
-# Roles that should be tracked for mod online/offline messages
+# Roles that should be tracked for mod online/offline messages & rping access
 ACTIVE_LOG_ROLE_IDS = {
     1410422029236047975,
-    1410419924173848626,
-    1410420126003630122,
-    1410423594579918860,
-    1410421466666631279,
+    1410419345234067568,
     1410421647265108038,
-    1410419345234067568
+    1410421466666631279,
+    1410423594579918860,
+    1410420126003630122,
+    1410419924173848626
 }
 
-# timezone display map (stacked)
+# Roles to DM for CRITICAL events (malicious intent)
+CRITICAL_NOTIFY_ROLE_IDS = {
+    1410422029236047975,
+    1410422762895577088,
+    1406326282429403306
+}
+
+# Timezones to display (stacked)
 TIMEZONES = {
     "🌍 UTC": ZoneInfo("UTC"),
     "🇺🇸 EST": ZoneInfo("America/New_York"),
@@ -43,8 +50,6 @@ TIMEZONES = {
 }
 
 DATA_FILE = "activity_logs.json"
-
-# inactivity random delay range (in seconds)
 INACTIVITY_MIN = 50
 INACTIVITY_MAX = 60
 
@@ -136,7 +141,6 @@ def parse_duration_abbrev(s: str) -> Optional[int]:
 def stacked_timezones(dt: datetime.datetime) -> str:
     lines = []
     for emoji, tz in TIMEZONES.items():
-        # show as e.g. Sep 09, 2025 – 05:42 AM
         lines.append(f"{emoji} {dt.astimezone(tz).strftime('%b %d, %Y – %I:%M %p')}")
     return "\n".join(lines)
 
@@ -147,7 +151,7 @@ def home(): return "✅ Bot is running!"
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-# run in executor so it won't block
+# run flask in executor so it doesn't block
 asyncio.get_event_loop().run_in_executor(None, run_flask)
 
 # ------------------ HTTP helper for attachments ------------------
@@ -168,18 +172,27 @@ async def download_and_prepare_files(urls: List[str]) -> List[discord.File]:
     return files
 
 # ------------------ Audit log helper ------------------
-async def fetch_audit_executor(guild: discord.Guild, action: discord.AuditLogAction, target_id: Optional[int] = None, limit: int = 20) -> Optional[discord.Member]:
+async def fetch_audit_executor(guild: discord.Guild, action: discord.AuditLogAction, target_id: Optional[int] = None, window_seconds: int = 10) -> Optional[discord.Member]:
+    # search recent entries for matching action and target within a small window
     try:
-        async for entry in guild.audit_logs(limit=limit, action=action):
+        async for entry in guild.audit_logs(limit=30, action=action):
+            # if target_id provided, try to match
             try:
-                if target_id is None:
-                    return entry.user
-                tid = getattr(entry.target, "id", None)
-                if tid is None:
-                    if str(target_id) == str(entry.target):
-                        return entry.user
+                target = entry.target
+                tid = getattr(target, "id", None)
+                if target_id is not None:
+                    if tid is None:
+                        if str(target_id) == str(target):
+                            # check time window
+                            if (datetime.datetime.now(datetime.timezone.utc) - entry.created_at).total_seconds() < window_seconds:
+                                return entry.user
+                    else:
+                        if int(tid) == int(target_id):
+                            if (datetime.datetime.now(datetime.timezone.utc) - entry.created_at).total_seconds() < window_seconds:
+                                return entry.user
                 else:
-                    if int(tid) == int(target_id):
+                    # no target filter, return recent entry
+                    if (datetime.datetime.now(datetime.timezone.utc) - entry.created_at).total_seconds() < window_seconds:
                         return entry.user
             except Exception:
                 continue
@@ -187,7 +200,7 @@ async def fetch_audit_executor(guild: discord.Guild, action: discord.AuditLogAct
     except Exception:
         return None
 
-async def send_server_log(embed: discord.Embed, files: Optional[List[discord.File]] = None):
+async def send_server_log(embed: discord.Embed, files: Optional[List[discord.File]] = None, dm_roles_critical: bool = False):
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         return
@@ -198,6 +211,19 @@ async def send_server_log(embed: discord.Embed, files: Optional[List[discord.Fil
                 await ch.send(embed=embed, files=files)
             else:
                 await ch.send(embed=embed)
+        except Exception:
+            pass
+
+    # DM critical roles for malicious-intent events
+    if dm_roles_critical:
+        try:
+            # find members with any of CRITICAL_NOTIFY_ROLE_IDS
+            for member in guild.members:
+                if any(r.id in CRITICAL_NOTIFY_ROLE_IDS for r in member.roles):
+                    try:
+                        await member.send(embed=embed)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -305,9 +331,9 @@ async def on_message(message: discord.Message):
         "created_at": now.isoformat()
     }
     # bound cache size
-    if len(message_cache) > 5000:
+    if len(message_cache) > 8000:
         keys = list(message_cache.keys())
-        for k in keys[:100]:
+        for k in keys[:200]:
             message_cache.pop(k, None)
 
     # reset offline state
@@ -353,12 +379,11 @@ async def on_message(message: discord.Message):
     log["inactive"] = False
     await save_data_async()
 
-# inactivity poller: runs every 1 second, increments active counters by 1 per sec
+# inactivity poller: runs every 1 second, increments active counters by 1s
 @tasks.loop(seconds=1)
 async def inactivity_poller():
     now = datetime.datetime.now(datetime.timezone.utc)
     for uid_str, log in list(activity_logs.items()):
-        # ensure delay assigned
         if not log.get("offline_delay"):
             log["offline_delay"] = random.randint(INACTIVITY_MIN, INACTIVITY_MAX)
         last_msg_iso = log.get("last_message")
@@ -371,7 +396,6 @@ async def inactivity_poller():
             delta = (now - last_msg_dt).total_seconds()
             delay = int(log.get("offline_delay", INACTIVITY_MIN))
             if delta >= delay:
-                # mark offline if not already started
                 if not log.get("offline_start"):
                     offline_start = last_msg_dt + datetime.timedelta(seconds=delay)
                     log["offline_start"] = offline_start.isoformat()
@@ -392,7 +416,6 @@ async def inactivity_poller():
                                             pass
                         except Exception:
                             pass
-                # update offline_seconds
                 try:
                     offline_start_dt = datetime.datetime.fromisoformat(log["offline_start"])
                     log["offline_seconds"] = (now - offline_start_dt).total_seconds()
@@ -400,7 +423,6 @@ async def inactivity_poller():
                     log["offline_seconds"] = delta
                 log["inactive"] = True
             else:
-                # still active - reset offline counters & increment online by 1s
                 log["offline_seconds"] = 0
                 log["offline_start"] = None
                 log["inactive"] = False
@@ -500,7 +522,6 @@ async def cmd_rmute(ctx: commands.Context, member: discord.Member, duration: str
     # DM member (EST formatting for time)
     try:
         expire_dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
-        # EST time string
         est = expire_dt.astimezone(ZoneInfo("America/New_York"))
         dm_text = (
             f"You have been muted in **{guild.name}** until\n"
@@ -527,9 +548,9 @@ async def cmd_rmute(ctx: commands.Context, member: discord.Member, duration: str
 
     await save_data_async()
 
-    # send embed to server log with stacked timezones
+    # send embed to server log with stacked timezones and DM critical roles
     embed = build_mute_embed(member, ctx.author, reason, seconds)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
     # ephemeral-like channel feedback: send and delete quickly
     try:
@@ -556,7 +577,7 @@ async def cmd_runmute(ctx: commands.Context, member: discord.Member):
             except Exception:
                 pass
         except discord.Forbidden:
-            return await ctx.reply("❌ Missing permission to remove role.", mention_author=False)
+            return await ctx.reply("❌ I don't have permission to remove Muted role or timeout.", mention_author=False)
     # clear stored mute
     log = get_user_log(member.id)
     orig_reason = log.get("mute_reason")
@@ -576,7 +597,7 @@ async def cmd_runmute(ctx: commands.Context, member: discord.Member):
     await save_data_async()
 
     embed = build_unmute_embed(member, ctx.author, orig_reason, orig_duration_seconds)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
     await ctx.reply(f"✅ {member.mention} has been unmuted.", mention_author=False)
 
 @bot.command(name="rhelp")
@@ -633,7 +654,7 @@ async def cmd_timetrack(ctx: commands.Context, member: discord.Member = None):
     embed = build_timetrack_embed(member, log)
     await ctx.send(embed=embed)
 
-# ------------------ Message delete & attachments handling ------------------
+# ------------------ Message delete/edit/purge handling ------------------
 @bot.event
 async def on_message_delete(message: discord.Message):
     guild = getattr(message, "guild", None)
@@ -655,7 +676,7 @@ async def on_message_delete(message: discord.Message):
     embed.add_field(name="Channel", value=(channel.mention if channel else (f"<#{cached['channel_id']}>" if cached else "Unknown")), inline=True)
     embed.add_field(name="Content", value=(content[:1024] if content else "⚠️ (empty or embed/attachment)"), inline=False)
 
-    # attempt to find deleter via audit log
+    # attempt to find deleter via audit log (message_delete action)
     if guild:
         try:
             executor = await fetch_audit_executor(guild, discord.AuditLogAction.message_delete)
@@ -673,19 +694,26 @@ async def on_message_delete(message: discord.Message):
         except Exception:
             embed.add_field(name="Attachment(s)", value="\n".join(attachments), inline=False)
 
-    await send_server_log(embed, files=files)
+    # If deleted attachments look suspicious, DM critical roles
+    await send_server_log(embed, files=files, dm_roles_critical=True if attachments else False)
     if cached:
         message_cache.pop(message.id, None)
 
 @bot.event
 async def on_bulk_message_delete(messages: List[discord.Message]):
     lines = []
+    attachments_all = []
     for m in messages:
         author = getattr(m, "author", None)
         author_name = getattr(author, "display_name", str(author)) if author else "Unknown"
         content = getattr(m, "content", "")
         created = getattr(m, "created_at", datetime.datetime.now(datetime.timezone.utc))
         lines.append(f"[{created.isoformat()}] {author_name}: {content}")
+        try:
+            for a in m.attachments:
+                attachments_all.append(a.url)
+        except Exception:
+            pass
     if not lines:
         return
     dump = "\n".join(lines)
@@ -696,7 +724,7 @@ async def on_bulk_message_delete(messages: List[discord.Message]):
     embed = discord.Embed(title="🧹 Messages Purged (bulk delete)", color=0xf39c12, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Count", value=str(len(lines)), inline=True)
     embed.add_field(name="Time", value=datetime.datetime.now(datetime.timezone.utc).isoformat(), inline=True)
-    await send_server_log(embed, files=[file])
+    await send_server_log(embed, files=[file], dm_roles_critical=True)
 
 @bot.event
 async def on_message_edit(before: discord.Message, after: discord.Message):
@@ -707,9 +735,53 @@ async def on_message_edit(before: discord.Message, after: discord.Message):
     embed.add_field(name="Channel", value=before.channel.mention if before.channel else "Unknown", inline=True)
     embed.add_field(name="Before", value=(before.content[:1024] or "(embed/attachment)"), inline=False)
     embed.add_field(name="After", value=(after.content[:1024] or "(embed/attachment)"), inline=False)
+
+    # attachments comparison
+    before_atts = [a.url for a in before.attachments] if getattr(before, "attachments", None) else []
+    after_atts = [a.url for a in after.attachments] if getattr(after, "attachments", None) else []
+    if before_atts != after_atts:
+        embed.add_field(name="Attachments changed", value=f"Before: {len(before_atts)} files\nAfter: {len(after_atts)} files", inline=False)
+        # include the files as links or reupload first one
+        if after_atts:
+            try:
+                files = await download_and_prepare_files(after_atts[:4])
+                await send_server_log(embed, files=files)
+                return
+            except Exception:
+                pass
     await send_server_log(embed)
 
 # ------------------ Guild / role / channel / webhook / emoji events ------------------
+async def attach_permissions_diff_and_send(guild: discord.Guild, title: str, executor: Optional[discord.Member], before_perms: discord.Permissions, after_perms: discord.Permissions, role_name: str):
+    added = []
+    removed = []
+    for perm_name in before_perms:
+        pass
+    # build lists of changed permissions explicitly
+    for name, value in before_perms:
+        pass  # iterating directly over Permissions doesn't produce name/value the same; do manual check below
+
+def perms_diff(before: discord.Permissions, after: discord.Permissions) -> (List[str], List[str]):
+    added = []
+    removed = []
+    # discord.Permissions has attributes for each perm; we'll check a list of common perm names
+    perm_names = [
+        "create_instant_invite","kick_members","ban_members","administrator","manage_channels","manage_guild",
+        "add_reactions","view_audit_log","priority_speaker","stream","view_channel","send_messages","send_tts_messages",
+        "manage_messages","embed_links","attach_files","read_message_history","mention_everyone","use_external_emojis",
+        "view_guild_insights","connect","speak","mute_members","deafen_members","move_members","use_vad","change_nickname",
+        "manage_nicknames","manage_roles","manage_webhooks","manage_emojis_and_stickers"
+    ]
+    for pn in perm_names:
+        b = getattr(before, pn, False)
+        a = getattr(after, pn, False)
+        if b != a:
+            if a and not b:
+                added.append(pn)
+            elif b and not a:
+                removed.append(pn)
+    return added, removed
+
 @bot.event
 async def on_guild_role_create(role: discord.Role):
     guild = role.guild
@@ -717,7 +789,7 @@ async def on_guild_role_create(role: discord.Role):
     embed = discord.Embed(title="🆕 Role Created", color=0x2ecc71, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Role", value=role.name, inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_guild_role_delete(role: discord.Role):
@@ -726,7 +798,12 @@ async def on_guild_role_delete(role: discord.Role):
     embed = discord.Embed(title="❌ Role Deleted", color=0xff6347, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Role name", value=role.name, inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    # attach a text file describing permissions that were on the role prior to deletion (if available)
+    perms_text = f"Role: {role.name}\nPermissions snapshot unavailable (role object still has perms but may be stale)\n"
+    buf = io.BytesIO(perms_text.encode("utf-8"))
+    buf.seek(0)
+    file = discord.File(fp=buf, filename=f"role_deleted_{role.id}.txt")
+    await send_server_log(embed, files=[file], dm_roles_critical=True)
 
 @bot.event
 async def on_guild_role_update(before: discord.Role, after: discord.Role):
@@ -735,14 +812,24 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role):
     changed = []
     if before.name != after.name:
         changed.append(f"Name: `{before.name}` → `{after.name}`")
-    if before.permissions != after.permissions:
-        changed.append("Permissions changed")
+    added, removed = perms_diff(before.permissions, after.permissions)
+    if added:
+        changed.append("✅ Added perms: " + ", ".join(added))
+    if removed:
+        changed.append("❌ Removed perms: " + ", ".join(removed))
     embed = discord.Embed(title="⚙️ Role Updated", color=0xf1c40f, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Role", value=after.name, inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
     if changed:
         embed.add_field(name="Changes", value="\n".join(changed), inline=False)
-    await send_server_log(embed)
+    # attach before/after perms snapshot
+    perms_before = "\n".join([f"{k}: {v}" for k,v in before.permissions if isinstance(v, bool)]) if hasattr(before.permissions, "__iter__") else str(before.permissions)
+    perms_after = "\n".join([f"{k}: {v}" for k,v in after.permissions if isinstance(v, bool)]) if hasattr(after.permissions, "__iter__") else str(after.permissions)
+    perms_txt = f"Role: {after.name}\n\n-- BEFORE PERMISSIONS --\n{str(before.permissions)}\n\n-- AFTER PERMISSIONS --\n{str(after.permissions)}\n"
+    buf = io.BytesIO(perms_txt.encode("utf-8"))
+    buf.seek(0)
+    file = discord.File(fp=buf, filename=f"role_update_{after.id}.txt")
+    await send_server_log(embed, files=[file], dm_roles_critical=True if (added or removed) else False)
 
 @bot.event
 async def on_guild_channel_create(channel):
@@ -751,7 +838,7 @@ async def on_guild_channel_create(channel):
     embed = discord.Embed(title="🆕 Channel Created", color=0x2ecc71, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Channel", value=channel.mention if hasattr(channel, "mention") else str(channel), inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_guild_channel_delete(channel):
@@ -760,7 +847,7 @@ async def on_guild_channel_delete(channel):
     embed = discord.Embed(title="❌ Channel Deleted", color=0xff6347, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Channel name", value=getattr(channel, "name", str(channel)), inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_guild_channel_update(before, after):
@@ -769,23 +856,30 @@ async def on_guild_channel_update(before, after):
     changed = []
     if getattr(before, "name", None) != getattr(after, "name", None):
         changed.append(f"Name: `{getattr(before,'name',None)}` → `{getattr(after,'name',None)}`")
-    # permissions changed detection can be more involved; we note existence
+    # compare permission overwrites
+    try:
+        before_ov = getattr(before, "overwrites", {})
+        after_ov = getattr(after, "overwrites", {})
+        # It's complex — we will include general notice
+        if before_ov != after_ov:
+            changed.append("Permission overwrites changed")
+    except Exception:
+        pass
     embed = discord.Embed(title="⚙️ Channel Updated", color=0xf1c40f, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Channel", value=after.mention if hasattr(after, "mention") else str(after), inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
     if changed:
         embed.add_field(name="Changes", value="\n".join(changed), inline=False)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True if any("Permission" in c for c in changed) else False)
 
 @bot.event
 async def on_webhooks_update(channel):
     guild = channel.guild
-    # best-effort executor
     executor = await fetch_audit_executor(guild, discord.AuditLogAction.webhook_create) or await fetch_audit_executor(guild, discord.AuditLogAction.webhook_update)
     embed = discord.Embed(title="🔗 Webhooks Updated", color=0xf1c40f, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="Channel", value=channel.mention, inline=True)
     embed.add_field(name="Recent audit (may be None)", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_guild_emojis_update(guild: discord.Guild, before, after):
@@ -814,7 +908,7 @@ async def on_member_ban(guild: discord.Guild, user: discord.User):
     embed = discord.Embed(title="🔨 User Banned", color=0xff6347, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="User", value=getattr(user, "mention", str(user)), inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_member_unban(guild: discord.Guild, user: discord.User):
@@ -822,7 +916,7 @@ async def on_member_unban(guild: discord.Guild, user: discord.User):
     embed = discord.Embed(title="✅ User Unbanned", color=0x2ecc71, timestamp=datetime.datetime.now(datetime.timezone.utc))
     embed.add_field(name="User", value=str(user), inline=True)
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
-    await send_server_log(embed)
+    await send_server_log(embed, dm_roles_critical=True)
 
 @bot.event
 async def on_member_remove(member: discord.Member):
@@ -866,7 +960,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
             except Exception:
                 pass
         embed = build_unmute_embed(after, executor or bot.user, None, None)
-        await send_server_log(embed)
+        await send_server_log(embed, dm_roles_critical=True)
         # clear stored mute info
         log = get_user_log(after.id)
         log["mute_expires"] = None
@@ -890,9 +984,7 @@ async def on_guild_integrations_update(guild: discord.Guild):
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     # join / leave / move / mute / deafen
-    guild = member.guild
     if before.channel != after.channel:
-        # join or leave or move
         embed = discord.Embed(title="🔊 Voice State Change", color=0x8e44ad, timestamp=datetime.datetime.now(datetime.timezone.utc))
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="From", value=(before.channel.mention if before.channel else "None"), inline=True)
@@ -939,7 +1031,7 @@ async def on_invite_delete(invite: discord.Invite):
     embed.add_field(name="By", value=executor.mention if executor else "Unknown", inline=True)
     await send_server_log(embed)
 
-# ------------------ START & BOOT ------------------
+# ------------------ BOOT ------------------
 if __name__ == "__main__":
     load_data()
     TOKEN = os.environ.get("DISCORD_TOKEN")
