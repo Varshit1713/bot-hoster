@@ -20,6 +20,19 @@ import discord
 from discord.ext import commands, tasks
 from discord import AuditLogAction, app_commands
 
+# ------------------ FLASK ------------------
+app = Flask(__name__)
+
+@app.route("/")
+def index():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))  # Render sets PORT automatically
+    app.run(host="0.0.0.0", port=port)
+
+threading.Thread(target=run_flask).start()
+
 # ------------------ CONFIG ------------------
 TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
