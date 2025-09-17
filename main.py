@@ -1,5 +1,5 @@
-# mega_timetrack_modlog_bot.py
-# All-in-one Timetrack + Moderation + Logging Discord bot
+# mega_discord_bot.py
+# All-in-one Discord bot: Timetrack + Moderation + Logging + Leaderboards + Caching
 # Python 3.9+, discord.py 2.x, pytz
 
 import discord
@@ -11,8 +11,9 @@ import json
 import os
 import threading
 import re
-import traceback
 import math
+import traceback
+from typing import Optional, List
 
 # ------------------ CONFIG ------------------
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -57,7 +58,7 @@ def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE, "r") as f:
             return json.load(f)
-    return {"users":{}, "mutes":{}, "images":{}, "logs":{}}
+    return {"users": {}, "mutes": {}, "images": {}, "logs": {}, "rmute_usage": {}}
 
 def save_data(data):
     with data_lock:
@@ -80,20 +81,20 @@ def save_data(data):
 def ensure_user_data(uid, data):
     if uid not in data["users"]:
         data["users"][uid] = {
-            "status":"offline",
-            "online_time":None,
-            "offline_time":None,
-            "last_message":None,
-            "last_edit":None,
-            "last_delete":None,
-            "last_online_times":{},
-            "offline_timer":0,
-            "total_online_seconds":0,
-            "daily_seconds":{},
-            "weekly_seconds":{},
-            "monthly_seconds":{},
-            "average_online":0,
-            "notify":True
+            "status": "offline",
+            "online_time": None,
+            "offline_time": None,
+            "last_message": None,
+            "last_edit": None,
+            "last_delete": None,
+            "last_online_times": {},
+            "offline_timer": 0,
+            "total_online_seconds": 0,
+            "daily_seconds": {},
+            "weekly_seconds": {},
+            "monthly_seconds": {},
+            "average_online": 0,
+            "notify": True
         }
 
 def format_time(dt):
@@ -107,10 +108,10 @@ def parse_duration(duration_str):
         return None
     amount, unit = match.groups()
     amount = int(amount)
-    if unit=="s": return amount
-    if unit=="m": return amount*60
-    if unit=="h": return amount*3600
-    if unit=="d": return amount*86400
+    if unit == "s": return amount
+    if unit == "m": return amount * 60
+    if unit == "h": return amount * 3600
+    if unit == "d": return amount * 86400
     return None
 
 def get_timezones():
@@ -246,7 +247,6 @@ async def on_message(message):
     uid=str(message.author.id)
     ensure_user_data(uid,data)
     data["users"][uid]["last_message"]=message.content
-    # cache images
     if message.attachments:
         for att in message.attachments:
             data["images"][att.url]={
@@ -292,15 +292,17 @@ async def timetrack(ctx, member: discord.Member=None):
 async def tt(ctx,member:discord.Member=None):
     await timetrack(ctx,member)
 
-# -- RHELP COMMAND --
 @bot.command()
 async def rhelp(ctx):
     embed=discord.Embed(title="📖 RHelp Commands", color=discord.Color.green())
     embed.add_field(name="!timetrack [user]", value="Shows timetrack data for a user.", inline=False)
     embed.add_field(name="!ttstats", value="Shows leaderboard of most online users.", inline=False)
-    embed.add_field(name="!rmute <@user> <duration> [reason]", value="Mute user(s) with role auto-remove.", inline=False)
+    embed.add_field(name="!rmute <@user> <duration> [reason]", value="Mute user(s) with auto-remove role.", inline=False)
     embed.add_field(name="!runmute <@user> <duration> [reason]", value="Logs unmute/mute info to channel.", inline=False)
     embed.add_field(name="!rmlb", value="Shows top 10 users who muted the most.", inline=False)
-    embed.add_field(name="!rcache", value="Shows all cached deleted images for allowed roles.", inline=False)
+    embed.add_field(name="!rcache", value="Shows cached deleted images for allowed roles.", inline=False)
     embed.add_field(name="!tlb", value="Shows Timetrack leaderboard.", inline=False)
     await ctx.send(embed=embed)
+
+# ------------------ START BOT ------------------
+bot.run(TOKEN)
