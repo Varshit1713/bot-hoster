@@ -1,498 +1,454 @@
-# mega_discord_bot_full_part1.py
-# Chunk 1/7: imports, config, utilities
-
-import os
-import json
-import asyncio
-import datetime
-import traceback
-import pytz
-from flask import Flask
+# ==============================================================
+# Discord Bot: Ultimate Full Feature Version
+# ==============================================================
 
 import discord
 from discord.ext import commands, tasks
+import asyncio
+import pytz
+import datetime
+import json
+import os
+from flask import Flask
+import threading
 
-# ------------------ CONFIG ------------------
-TOKEN = os.environ.get('DISCORD_TOKEN')
-DATA_FILE = 'bot_data.json'
+# -------------------------
+# Flask Keep-Alive Setup
+# -------------------------
+app = Flask("")
 
-# Roles and Channels
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+threading.Thread(target=run_flask).start()
+
+# -------------------------
+# Bot Setup & Constants
+# -------------------------
+TOKEN = os.environ.get("DISCORD_TOKEN")
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Roles/Channels/User IDs
 RCACHE_ROLES = [1410422029236047975, 1410422762895577088, 1406326282429403306]
 MUTE_ROLE_ID = 1410423854563721287
-MUTE_TRACK_CHANNEL = 1410458084874260592
+TRACKING_CHANNEL_ID = 1410458084874260592
 STAFF_PING_ROLE = 1410422475942264842
 HIGHER_STAFF_PING_ROLE = 1410422656112791592
-PING_CHANNELS = [1403422664521023648, 1410458084874260592]
-DM_SAFE_USERS = [1406326282429403306, 1410422762895577088, 1410422029236047975]
+DANGEROUS_NOTIFY_IDS = [1406326282429403306, 1410422762895577088, 1410422029236047975]
 
-INACTIVITY_THRESHOLD_DAYS = 120
+DATA_FILE = "bot_data.json"
+COOLDOWN_TIME = 5  # seconds default per command
 
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# ------------------ UTILITIES ------------------
-def safe_print(*args):
-    """Safe print with UTC timestamp."""
-    print(datetime.datetime.now(pytz.utc).strftime('[%Y-%m-%d %H:%M:%S]'), *args)
+# -------------------------
+# Load / Save Data
+# -------------------------
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "w") as f:
+        json.dump({
+            "users": {}, 
+            "mutes": {}, 
+            "rmute_usage": {}, 
+            "cached_messages": {}, 
+            "rdm_users": [],
+            "logs": {},
+            "cooldowns": {}
+        }, f)
 
 def load_data():
-    """Load bot JSON data safely."""
-    if not os.path.exists(DATA_FILE):
-        return {'users': {}, 'mutes': {}, 'rmute_usage': {}, 'rdm_users': []}
-    with open(DATA_FILE, 'r', encoding='utf-8') as f:
+    with open(DATA_FILE, "r") as f:
         return json.load(f)
 
 def save_data(data):
-    """Save bot JSON data."""
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, default=str)
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=4)
 
-def init_data_structure():
-    """Initialize base data structure."""
-    return {'users': {}, 'mutes': {}, 'rmute_usage': {}, 'rdm_users': []}
-    # mega_discord_bot_full_part2.py
-# Chunk 2/7: Timetrack system
+data = load_data()
 
-# ------------------ TIMETRACK ------------------
+# -------------------------
+# Helper Functions
+# -------------------------
+def tz_now():
+    return datetime.datetime.now(pytz.utc)
+
+def format_seconds(seconds):
+    h, m = divmod(seconds, 3600)
+    m, s = divmod(m, 60)
+    return f"{int(h)}h {int(m)}m {int(s)}s"
+
+def is_rcache_role(member):
+    return any(role.id in RCACHE_ROLES for role in member.roles)
+
+async def send_dm(user: discord.User, embed: discord.Embed, force=False):
+    if str(user.id) in data.get("rdm_users", []) and not force:
+        return
+    try:
+        await user.send(embed=embed)
+    except:
+        pass
+
+def parse_duration(duration_str):
+    unit = duration_str[-1]
+    num = int(duration_str[:-1])
+    if unit == "s":
+        return num
+    elif unit == "m":
+        return num*60
+    elif unit == "h":
+        return num*3600
+    elif unit == "d":
+        return num*86400
+    else:
+        return num
+
+# -------------------------
+# Cooldown System
+# -------------------------
+def check_cooldown(user_id, command):
+    now_ts = tz_now().timestamp()
+    user_cd = data.get("cooldowns", {}).get(str(user_id), {})
+    last = user_cd.get(command, 0)
+    if now_ts - last < COOLDOWN_TIME:
+        return False
+    data.setdefault("cooldowns", {}).setdefault(str(user_id), {})[command] = now_ts
+    save_data(data)
+    return True
+
+# -------------------------
+# Timetrack System
+# -------------------------
 @tasks.loop(seconds=60)
 async def timetrack_loop():
-    """Track members’ online/offline time every 60 seconds."""
-    data = load_data()
-    now = datetime.datetime.now(pytz.utc)
+    now = tz_now().timestamp()
     for guild in bot.guilds:
         for member in guild.members:
-            # Only track members with RCACHE_ROLES
-            if any(role.id in RCACHE_ROLES for role in member.roles):
-                uid = str(member.id)
-                udata = data['users'].setdefault(uid, {
-                    'total_online_seconds': 0,
-                    'online_start': None,
-                    'last_online': None,
-                    'last_message': '',
-                    'last_edit': None
-                })
-                if member.status != discord.Status.offline:
-                    # Start session if not already started
-                    if not udata.get('online_start'):
-                        udata['online_start'] = now.isoformat()
-                else:
-                    # End session and accumulate online time
-                    if udata.get('online_start'):
-                        start = datetime.datetime.fromisoformat(udata['online_start'])
-                        diff = (now - start).total_seconds()
-                        udata['total_online_seconds'] += diff
-                        udata['online_start'] = None
-                        udata['last_online'] = now.isoformat()
+            if member.bot or not is_rcache_role(member):
+                continue
+            uid = str(member.id)
+            udata = data["users"].get(uid, {})
+            online = member.status != discord.Status.offline
+            if online:
+                if not udata.get("online_start"):
+                    udata["online_start"] = now
+            else:
+                if udata.get("online_start"):
+                    session = now - udata["online_start"]
+                    udata["total_online_seconds"] = udata.get("total_online_seconds", 0) + session
+                    udata["online_start"] = None
+            udata["last_online"] = now
+            data["users"][uid] = udata
     save_data(data)
 
-# ------------------ MESSAGE TRACKING ------------------
-@bot.event
-async def on_message(message):
-    """Track last message per user for timetrack."""
-    if message.author.bot:
-        return
-    data = load_data()
-    uid = str(message.author.id)
-    udata = data['users'].setdefault(uid, {
-        'total_online_seconds': 0,
-        'online_start': None,
-        'last_online': None,
-        'last_message': '',
-        'last_edit': None
-    })
-    udata['last_message'] = message.content
-    save_data(data)
-    await bot.process_commands(message)
-
-@bot.event
-async def on_message_edit(before, after):
-    """Track last edit per user for timetrack."""
-    if after.author.bot:
-        return
-    data = load_data()
-    uid = str(after.author.id)
-    udata = data['users'].setdefault(uid, {
-        'total_online_seconds': 0,
-        'online_start': None,
-        'last_online': None,
-        'last_message': '',
-        'last_edit': None
-    })
-    udata['last_edit'] = datetime.datetime.now(pytz.utc).isoformat()
-    save_data(data)
-    # mega_discord_bot_full_part3.py
-# Chunk 3/7: RMute / Runmute
-
-async def unmute_after(user_id, duration):
-    """Automatically unmute a user after duration seconds."""
-    await asyncio.sleep(duration)
-    data = load_data()
-    uid = str(user_id)
-    guild = bot.guilds[0]
-    user = guild.get_member(user_id)
-    role = guild.get_role(MUTE_ROLE_ID)
-    if user and role:
-        await user.remove_roles(role, reason='Auto unmute')
-    if uid in data['mutes']:
-        data['mutes'].pop(uid)
-        save_data(data)
-    channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-    if channel:
-        await channel.send(f'🔔 Auto-unmuted <@{user_id}> after duration.')
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def rmute(ctx, users: commands.Greedy[discord.Member], duration: int, *, reason=None):
-    """Mute multiple users with auto-unmute and log."""
-    data = load_data()
-    for user in users:
-        uid = str(user.id)
-        role = ctx.guild.get_role(MUTE_ROLE_ID)
-        if role:
-            await user.add_roles(role, reason=reason)
-        data['mutes'][uid] = {
-            'moderator': ctx.author.id,
-            'duration': duration,
-            'reason': reason,
-            'start_time': datetime.datetime.now(pytz.utc).isoformat()
-        }
-        data['rmute_usage'][str(ctx.author.id)] = data['rmute_usage'].get(str(ctx.author.id), 0) + 1
-        save_data(data)
-        await ctx.send(f'🔇 Muted {user} for {duration} seconds.')
-        bot.loop.create_task(unmute_after(user.id, duration))
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def runmute(ctx, user: discord.Member, duration: int, *, reason=None):
-    """Mute a single user (runmute) with auto-unmute."""
-    data = load_data()
-    uid = str(user.id)
-    role = ctx.guild.get_role(MUTE_ROLE_ID)
-    if role:
-        await user.add_roles(role, reason=reason)
-    data['mutes'][uid] = {
-        'moderator': ctx.author.id,
-        'duration': duration,
-        'reason': reason,
-        'start_time': datetime.datetime.now(pytz.utc).isoformat()
-    }
-    data['rmute_usage'][str(ctx.author.id)] = data['rmute_usage'].get(str(ctx.author.id), 0) + 1
-    save_data(data)
-    await ctx.send(f'🔇 Muted {user} for {duration} seconds.')
-    bot.loop.create_task(unmute_after(user.id, duration))
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def rmlb(ctx):
-    """Show top 10 users who used rmute the most."""
-    data = load_data()
-    usage = data.get('rmute_usage', {})
-    sorted_usage = sorted(usage.items(), key=lambda x: x[1], reverse=True)[:10]
-    embed = discord.Embed(title='📊 RMute Leaderboard')
-    for uid, count in sorted_usage:
-        member = ctx.guild.get_member(int(uid))
-        embed.add_field(name=str(member), value=f'RMutes used: {count}', inline=False)
-    await ctx.send(embed=embed)
-    # mega_discord_bot_full_part4.py
-# Chunk 4/7: Leaderboards and Cache/RCache
-
-# ------------------ LEADERBOARDS ------------------
 @bot.command()
 async def tlb(ctx):
-    """Timetrack leaderboard for members with RCACHE_ROLES."""
-    data = load_data()
-    members_data = []
-    for uid, u in data.get('users', {}).items():
+    if not check_cooldown(ctx.author.id, "tlb"):
+        return await ctx.send("Cooldown active.")
+    now_ts = tz_now().timestamp()
+    users_list = []
+    for uid, udata in data["users"].items():
         member = ctx.guild.get_member(int(uid))
-        if member and any(role.id in RCACHE_ROLES for role in member.roles):
-            total_seconds = u.get('total_online_seconds', 0)
-            members_data.append((member, total_seconds))
-    members_data.sort(key=lambda x: x[1], reverse=True)
-    embed = discord.Embed(title='📈 Timetrack Leaderboard')
-    for i, (member, total_seconds) in enumerate(members_data[:10], start=1):
-        daily_avg = total_seconds / 120  # approx daily average
-        embed.add_field(name=f'{i}. {member}', value=f'Total Online: {int(total_seconds)}s\nDaily Avg: {int(daily_avg)}s', inline=False)
+        if not member or not is_rcache_role(member):
+            continue
+        total = udata.get("total_online_seconds", 0)
+        if udata.get("online_start"):
+            total += now_ts - udata["online_start"]
+        users_list.append((member.display_name, total))
+    users_list.sort(key=lambda x: x[1], reverse=True)
+    embed = discord.Embed(title="Timetrack Leaderboard", color=discord.Color.blurple())
+    for name, total in users_list[:10]:
+        embed.add_field(name=name, value=format_seconds(total), inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 async def tdm(ctx):
-    """Timetrack leaderboard for users without RCACHE_ROLES."""
-    data = load_data()
-    members_data = []
-    for uid, u in data.get('users', {}).items():
+    if not check_cooldown(ctx.author.id, "tdm"):
+        return await ctx.send("Cooldown active.")
+    now_ts = tz_now().timestamp()
+    users_list = []
+    for uid, udata in data["users"].items():
         member = ctx.guild.get_member(int(uid))
-        if member and not any(role.id in RCACHE_ROLES for role in member.roles):
-            total_seconds = u.get('total_online_seconds', 0)
-            members_data.append((member, total_seconds))
-    members_data.sort(key=lambda x: x[1], reverse=True)
-    embed = discord.Embed(title='📈 Timetrack (Non-RCache Roles)')
-    for i, (member, total_seconds) in enumerate(members_data[:10], start=1):
-        daily_avg = total_seconds / 120
-        embed.add_field(name=f'{i}. {member}', value=f'Total Online: {int(total_seconds)}s\nDaily Avg: {int(daily_avg)}s', inline=False)
+        if not member or is_rcache_role(member):
+            continue
+        total = udata.get("total_online_seconds", 0)
+        if udata.get("online_start"):
+            total += now_ts - udata["online_start"]
+        users_list.append((member.display_name, total))
+    users_list.sort(key=lambda x: x[1], reverse=True)
+    embed = discord.Embed(title="Timetrack Leaderboard (Non-RCache)", color=discord.Color.orange())
+    for name, total in users_list[:10]:
+        embed.add_field(name=name, value=format_seconds(total), inline=False)
     await ctx.send(embed=embed)
 
-# ------------------ CACHE / RCACHE ------------------
+# -------------------------
+# RMute / Runmute System
+# -------------------------
+async def rmute_user(ctx, member: discord.Member, duration_seconds: int, reason: str):
+    mute_role = ctx.guild.get_role(MUTE_ROLE_ID)
+    if mute_role in member.roles:
+        return
+    await member.add_roles(mute_role, reason=reason)
+    uid = str(member.id)
+    now_ts = tz_now().timestamp()
+    data["mutes"][uid] = {"moderator": ctx.author.id, "start": now_ts, "duration": duration_seconds, "reason": reason}
+    data["rmute_usage"][str(ctx.author.id)] = data.get("rmute_usage", {}).get(str(ctx.author.id), 0) + 1
+    save_data(data)
+    # DM User
+    embed = discord.Embed(title="You have been muted", color=discord.Color.red())
+    embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    embed.add_field(name="Duration", value=format_seconds(duration_seconds), inline=False)
+    embed.add_field(name="Reason", value=reason, inline=False)
+    await send_dm(member, embed)
+    # Log
+    log_embed = discord.Embed(title="User Muted", color=discord.Color.red())
+    log_embed.add_field(name="User", value=member.mention, inline=False)
+    log_embed.add_field(name="Moderator", value=ctx.author.mention, inline=False)
+    log_embed.add_field(name="Duration", value=format_seconds(duration_seconds), inline=False)
+    log_embed.add_field(name="Reason", value=reason, inline=False)
+    log_embed.timestamp = tz_now()
+    await send_dm_for_danger(log_embed)
+    channel = ctx.guild.get_channel(TRACKING_CHANNEL_ID)
+    if channel:
+        await channel.send(embed=log_embed)
+    # Auto-unmute
+    asyncio.create_task(auto_unmute(member, duration_seconds))
+
+async def auto_unmute(member, duration_seconds):
+    await asyncio.sleep(duration_seconds)
+    mute_role = member.guild.get_role(MUTE_ROLE_ID)
+    if mute_role in member.roles:
+        await member.remove_roles(mute_role, reason="Auto-unmute")
+        uid = str(member.id)
+        if uid in data["mutes"]:
+            del data["mutes"][uid]
+        save_data(data)
+        embed = discord.Embed(title="User Automatically Unmuted", color=discord.Color.green())
+        embed.add_field(name="User", value=member.mention, inline=False)
+        channel = member.guild.get_channel(TRACKING_CHANNEL_ID)
+        if channel:
+            await channel.send(embed=embed)
+
+@bot.command()
+async def rmute(ctx, members: commands.Greedy[discord.Member], duration: str, *, reason: str):
+    if not check_cooldown(ctx.author.id, "rmute"):
+        return await ctx.send("Cooldown active.")
+    seconds = parse_duration(duration)
+    for member in members:
+        await rmute_user(ctx, member, seconds, reason)
+    await ctx.message.delete()
+
+@bot.command()
+async def runmute(ctx, member: discord.Member, duration: str, *, reason: str):
+    if not check_cooldown(ctx.author.id, "runmute"):
+        return await ctx.send("Cooldown active.")
+    seconds = parse_duration(duration)
+    await rmute_user(ctx, member, seconds, reason)
+    await ctx.message.delete()
+
+@bot.command()
+async def rmlb(ctx):
+    usage = data.get("rmute_usage", {})
+    sorted_usage = sorted(usage.items(), key=lambda x:x[1], reverse=True)
+    embed = discord.Embed(title="RMute Leaderboard", color=discord.Color.purple())
+    for uid, count in sorted_usage[:10]:
+        member = ctx.guild.get_member(int(uid))
+        embed.add_field(name=member.display_name if member else uid, value=f"Mutes: {count}", inline=False)
+    await ctx.send(embed=embed)
+
+# -------------------------
+# Cache System
+# -------------------------
 @bot.command()
 async def rcache(ctx):
-    """Show deleted messages/images for members with RCACHE_ROLES."""
-    if not any(role.id in RCACHE_ROLES for role in ctx.author.roles):
-        await ctx.send('❌ You do not have permission to access rcache.')
-        return
-    data = load_data()
-    deleted_msgs = data.get('deleted_messages', [])
-    embed = discord.Embed(title='🗂️ RCache Deleted Messages')
-    for d in deleted_msgs[-10:]:  # show last 10
-        content = (d.get('content') or '')[:200]
-        embed.add_field(name=f"Msg {d.get('message_id')} by {d.get('author')}", value=f"{content}\nTime: {d.get('time')}", inline=False)
+    if not is_rcache_role(ctx.author):
+        return await ctx.send("You do not have permission.")
+    embed = discord.Embed(title="Deleted Messages Cache", color=discord.Color.blurple())
+    for mid, cdata in data.get("cached_messages", {}).items():
+        info = f"Author: {cdata.get('author_name')}\nContent: {cdata.get('content')}\nAttachments: {', '.join(cdata.get('attachments',[]))}\nDeleted By: {cdata.get('deleted_by')}"
+        embed.add_field(name=f"Message ID: {mid}", value=info, inline=False)
     await ctx.send(embed=embed)
 
-# ------------------ LOGGING EXAMPLE ------------------
-@bot.event
-async def on_message_delete(message):
-    data = load_data()
-    deleted = data.setdefault('deleted_messages', [])
-    deleted.append({
-        'message_id': message.id,
-        'author': str(message.author),
-        'content': message.content,
-        'attachments': [a.url for a in message.attachments],
-        'channel': str(message.channel),
-        'time': datetime.datetime.now(pytz.utc).isoformat()
-    })
-    if len(deleted) > 100:
-        deleted.pop(0)
-    save_data(data)
-    # mega_discord_bot_full_part5.py
-# Chunk 5/7: Staff Ping, DM control, purge tracking
+# -------------------------
+# Logging & Dangerous DM Notifications
+# -------------------------
+async def log_action(embed: discord.Embed):
+    channel = bot.get_channel(TRACKING_CHANNEL_ID)
+    if channel:
+        await channel.send(embed=embed)
 
-# ------------------ STAFF PING ------------------
+async def send_dm_for_danger(embed: discord.Embed):
+    for uid in DANGEROUS_NOTIFY_IDS:
+        user = bot.get_user(uid)
+        if user:
+            await send_dm(user, embed, force=True)
+
+# -------------------------
+# Staff Ping System
+# -------------------------
 @bot.command()
 async def rping(ctx):
-    """Ping STAFF_PING_ROLE and log if replying to a message."""
+    if not check_cooldown(ctx.author.id, "rping"):
+        return await ctx.send("Cooldown active.")
     role = ctx.guild.get_role(STAFF_PING_ROLE)
-    if not role:
-        await ctx.send("❌ STAFF_PING_ROLE not found.")
-        return
-    msg = f"{role.mention} – pinged by {ctx.author.mention}"
-    await ctx.send(msg)
+    if role:
+        await ctx.send(f"{role.mention}")
     await ctx.message.delete()
-    if ctx.message.reference:
-        ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        safe_print(f"RPing Reply Log: {ctx.author} replied to {ref_msg.author}: {ref_msg.content}")
 
 @bot.command()
 async def hsping(ctx):
-    """Ping HIGHER_STAFF_PING_ROLE and log if replying to a message."""
+    if not check_cooldown(ctx.author.id, "hsping"):
+        return await ctx.send("Cooldown active.")
     role = ctx.guild.get_role(HIGHER_STAFF_PING_ROLE)
-    if not role:
-        await ctx.send("❌ HIGHER_STAFF_PING_ROLE not found.")
-        return
-    msg = f"{role.mention} – pinged by {ctx.author.mention}"
-    await ctx.send(msg)
+    if role:
+        await ctx.send(f"{role.mention}")
     await ctx.message.delete()
-    if ctx.message.reference:
-        ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        safe_print(f"HSPing Reply Log: {ctx.author} replied to {ref_msg.author}: {ref_msg.content}")
 
-# ------------------ DM & NOTIFICATION CONTROL ------------------
-async def send_safe_dm(user, embed):
-    data = load_data()
-    if str(user.id) not in data.get('rdm_users', []):
-        try:
-            await user.send(embed=embed)
-        except:
-            safe_print(f"⚠️ Could not send DM to {user}")
-
-# ------------------ PURGE & DELETED MESSAGE TRACKING ------------------
+# -------------------------
+# DM Opt-out System
+# -------------------------
 @bot.command()
-@commands.has_permissions(manage_messages=True)
-async def purge(ctx, amount: int):
-    """Delete messages and log them."""
-    messages = await ctx.channel.history(limit=amount).flatten()
-    data = load_data()
-    deleted_msgs = data.setdefault('deleted_messages', [])
-    for msg in messages:
-        deleted_msgs.append({
-            'message_id': msg.id,
-            'author': str(msg.author),
-            'content': msg.content,
-            'attachments': [a.url for a in msg.attachments],
-            'channel': str(msg.channel),
-            'time': datetime.datetime.now(pytz.utc).isoformat(),
-            'deleted_by': str(ctx.author),
-            'reply_to': msg.reference.message_id if msg.reference else None
-        })
-        if len(deleted_msgs) > 200:
-            deleted_msgs.pop(0)
+async def rdm(ctx):
+    uid = str(ctx.author.id)
+    if uid in data.get("rdm_users", []):
+        data["rdm_users"].remove(uid)
+        await ctx.send("You will now receive bot DMs.")
+    else:
+        data.setdefault("rdm_users", []).append(uid)
+        await ctx.send("You have opted out from bot DMs.")
     save_data(data)
-    await ctx.channel.delete_messages(messages)
-    track_channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-    if track_channel:
-        await track_channel.send(f"🗑️ {ctx.author} purged {len(messages)} messages in {ctx.channel}.")
-        # mega_discord_bot_full_part6.py
-# Chunk 6/7: Help command, daily maintenance, and final startup
 
-# ------------------ HELP COMMAND ------------------
+# -------------------------
+# Help Command
+# -------------------------
 @bot.command()
 async def rhelp(ctx):
-    embed = discord.Embed(title="📜 Mega Bot Commands", color=0x1abc9c)
-    embed.add_field(name="!timetrack [user]", value="Show online stats for a user", inline=False)
-    embed.add_field(name="!rmute [users] [duration] [reason]", value="Mute multiple users", inline=False)
-    embed.add_field(name="!runmute [user] [duration] [reason]", value="Mute a single user", inline=False)
-    embed.add_field(name="!rmlb", value="Top 10 users who used rmute", inline=False)
-    embed.add_field(name="!rcache", value="Show cached deleted messages/images", inline=False)
-    embed.add_field(name="!tlb", value="Timetrack leaderboard (RCACHE_ROLES only)", inline=False)
-    embed.add_field(name="!tdm", value="Leaderboard for users without roles", inline=False)
-    embed.add_field(name="!rping", value="Ping STAFF_PING_ROLE", inline=False)
-    embed.add_field(name="!hsping", value="Ping HIGHER_STAFF_PING_ROLE", inline=False)
-    embed.add_field(name="!rdm", value="Opt-out from bot DMs", inline=False)
-    embed.set_footer(text="All commands use fancy embeds and are logged.")
+    embed = discord.Embed(title="Bot Commands", color=discord.Color.blurple())
+    cmds = {
+        "!timetrack [user]":"Show online stats",
+        "!rmute [users] [duration] [reason]":"Mute multiple users",
+        "!runmute [user] [duration] [reason]":"Mute single user",
+        "!rmlb":"Top RMute users",
+        "!rcache":"Deleted messages cache",
+        "!tlb":"Top online users",
+        "!tdm":"Top users without roles",
+        "!rping":"Ping staff",
+        "!hsping":"Ping higher staff",
+        "!rdm":"Opt-out/opt-in bot DMs",
+    }
+    for c,d in cmds.items():
+        embed.add_field(name=c, value=d, inline=False)
     await ctx.send(embed=embed)
 
-# ------------------ DAILY MAINTENANCE TASK ------------------
-@tasks.loop(hours=24)
-async def daily_maintenance_task():
-    try:
-        data = load_data()
-        cutoff = datetime.datetime.now(pytz.utc) - datetime.timedelta(days=INACTIVITY_THRESHOLD_DAYS)
-        for uid, u in data.get('users', {}).items():
-            daily = u.get('daily_seconds', {})
-            keys_to_remove = [k for k in daily if datetime.datetime.fromisoformat(k) < cutoff]
-            for k in keys_to_remove: daily.pop(k, None)
-        save_data(data)
-    except Exception as e:
-        safe_print('⚠️ daily maintenance error:', e)
-        traceback.print_exc()
-
-# ------------------ STARTUP ------------------
-if __name__ == "__main__":
-    try:
-        safe_print("🚀 Starting mega bot with audit reconciliation...")
-        if not os.path.exists(DATA_FILE):
-            save_data(init_data_structure())
-        timetrack_loop.start()
-        daily_maintenance_task.start()
-        bot.run(TOKEN)
-    except Exception as e:
-        safe_print("❌ Fatal error while running bot:", e)
-        traceback.print_exc()
-        # mega_discord_bot_full_part7.py
-# Chunk 7/7: Final utilities, logging, embed helpers, extra mod logging
-
-# ------------------ EMBED HELPERS ------------------
-def create_embed(title, description="", color=0x1abc9c, fields=None, footer=None):
-    embed = discord.Embed(title=title, description=description, color=color)
-    if fields:
-        for name, value, inline in fields:
-            embed.add_field(name=name, value=value, inline=inline)
-    if footer:
-        embed.set_footer(text=footer)
-    return embed
-
-# ------------------ LOGGING HELPERS ------------------
-async def log_mod_action(action_type, moderator_id, target_id, details=""):
-    try:
-        data = load_data()
-        channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-        if channel:
-            embed = create_embed(
-                title=f"📝 Mod Action: {action_type}",
-                fields=[
-                    ("Moderator", f"<@{moderator_id}>", True),
-                    ("Target", f"<@{target_id}>", True),
-                    ("Details", details, False)
-                ],
-                footer=f"Time: {datetime.datetime.now(pytz.utc).isoformat()}"
-            )
-            await channel.send(embed=embed)
-    except Exception as e:
-        safe_print("⚠️ log_mod_action error:", e)
-
-# ------------------ PURGE & DELETED MESSAGE TRACKING ------------------
+# -------------------------
+# Logging Events
+# -------------------------
 @bot.event
-async def on_bulk_message_delete(messages):
-    try:
-        data = load_data()
-        channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-        for m in messages:
-            uid = str(m.author.id)
-            cached = data.setdefault("cache", {})
-            cached.setdefault(uid, []).append({
-                "content": m.content,
-                "attachments": [a.url for a in m.attachments],
-                "timestamp": m.created_at.isoformat()
-            })
-        if channel:
-            await channel.send(f"🗑️ Bulk delete: {len(messages)} messages logged.")
-        save_data(data)
-    except Exception as e:
-        safe_print("⚠️ on_bulk_message_delete error:", e)
+async def on_guild_channel_create(channel):
+    embed = discord.Embed(title="Channel Created", color=discord.Color.green())
+    embed.add_field(name="Channel", value=f"{channel.name} ({channel.id})", inline=False)
+    embed.add_field(name="Guild", value=channel.guild.name, inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
 
 @bot.event
-async def on_message_delete(message):
-    try:
-        data = load_data()
-        uid = str(message.author.id)
-        cached = data.setdefault("cache", {})
-        cached.setdefault(uid, []).append({
-            "content": message.content,
-            "attachments": [a.url for a in message.attachments],
-            "timestamp": message.created_at.isoformat()
-        })
-        save_data(data)
-    except Exception as e:
-        safe_print("⚠️ on_message_delete error:", e)
+async def on_guild_channel_delete(channel):
+    embed = discord.Embed(title="Channel Deleted", color=discord.Color.red())
+    embed.add_field(name="Channel", value=f"{channel.name} ({channel.id})", inline=False)
+    embed.add_field(name="Guild", value=channel.guild.name, inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
 
-# ------------------ CHANNEL & ROLE EDIT LOGGING ------------------
 @bot.event
 async def on_guild_channel_update(before, after):
-    try:
-        channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-        embed = create_embed(
-            title="📢 Channel Updated",
-            fields=[
-                ("Before", f"{before.name}", True),
-                ("After", f"{after.name}", True)
-            ],
-            footer=f"Channel ID: {after.id}"
-        )
-        if channel: await channel.send(embed=embed)
-    except Exception as e:
-        safe_print("⚠️ on_guild_channel_update error:", e)
+    embed = discord.Embed(title="Channel Updated", color=discord.Color.orange())
+    embed.add_field(name="Before", value=before.name, inline=False)
+    embed.add_field(name="After", value=after.name, inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
+
+@bot.event
+async def on_guild_role_create(role):
+    embed = discord.Embed(title="Role Created", color=discord.Color.green())
+    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
+
+@bot.event
+async def on_guild_role_delete(role):
+    embed = discord.Embed(title="Role Deleted", color=discord.Color.red())
+    embed.add_field(name="Role", value=f"{role.name} ({role.id})", inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
 
 @bot.event
 async def on_guild_role_update(before, after):
-    try:
-        channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-        embed = create_embed(
-            title="📢 Role Updated",
-            fields=[
-                ("Before", f"{before.name}", True),
-                ("After", f"{after.name}", True)
-            ],
-            footer=f"Role ID: {after.id}"
-        )
-        if channel: await channel.send(embed=embed)
-    except Exception as e:
-        safe_print("⚠️ on_guild_role_update error:", e)
+    embed = discord.Embed(title="Role Updated", color=discord.Color.orange())
+    embed.add_field(name="Before", value=before.name, inline=False)
+    embed.add_field(name="After", value=after.name, inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
 
-# ------------------ WEBHOOK & PERMISSION LOGGING ------------------
 @bot.event
-async def on_webhooks_update(channel):
-    try:
-        log_channel = bot.get_channel(MUTE_TRACK_CHANNEL)
-        if log_channel:
-            await log_channel.send(f"🔔 Webhooks updated in {channel.name}")
-    except Exception as e:
-        safe_print("⚠️ on_webhooks_update error:", e)
+async def on_webhook_update(channel):
+    embed = discord.Embed(title="Webhook Updated", color=discord.Color.gold())
+    embed.add_field(name="Channel", value=f"{channel.name} ({channel.id})", inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
 
-# ------------------ EXTRA UTILITIES ------------------
-def can_execute_command(user_id, cooldowns):
-    # Placeholder for cooldown system
-    return True
+@bot.event
+async def on_message_delete(message):
+    uid = str(message.author.id)
+    data["cached_messages"][str(message.id)] = {
+        "author_id": message.author.id,
+        "author_name": message.author.display_name,
+        "content": message.content,
+        "attachments": [a.url for a in message.attachments],
+        "channel": message.channel.id,
+        "timestamp": message.created_at.timestamp(),
+        "deleted_by": None  # optional: track if moderator deleted
+    }
+    save_data(data)
 
-# ------------------ FINAL STARTUP LOG ------------------
+@bot.event
+async def on_bulk_message_delete(messages):
+    embed = discord.Embed(title="Messages Purged", color=discord.Color.red())
+    for message in messages:
+        info = f"Author: {message.author.display_name}\nContent: {message.content}\nAttachments: {', '.join([a.url for a in message.attachments])}"
+        embed.add_field(name=f"Message ID: {message.id}", value=info, inline=False)
+    embed.timestamp = tz_now()
+    await log_action(embed)
+
+# -------------------------
+# Bot Ready
+# -------------------------
 @bot.event
 async def on_ready():
-    safe_print(f"✅ Bot connected as {bot.user} (ID: {bot.user.id})")
-    safe_print("⏱ Timetrack loop and daily maintenance active.")
+    print(f"{bot.user} has connected and is ready!")
+    timetrack_loop.start()
+    # Restart auto-unmute for existing mutes
+    now_ts = tz_now().timestamp()
+    for uid, mute_info in data.get("mutes", {}).items():
+        member = None
+        for guild in bot.guilds:
+            member = guild.get_member(int(uid))
+            if member:
+                break
+        if member:
+            elapsed = now_ts - mute_info["start"]
+            remaining = mute_info["duration"] - elapsed
+            if remaining > 0:
+                asyncio.create_task(auto_unmute(member, remaining))
+            else:
+                mute_role = member.guild.get_role(MUTE_ROLE_ID)
+                if mute_role in member.roles:
+                    asyncio.create_task(member.remove_roles(mute_role, reason="Auto-unmute after restart"))
+                    del data["mutes"][uid]
+    save_data(data)
+
+# -------------------------
+# Run Bot
+# -------------------------
+bot.run(TOKEN)
