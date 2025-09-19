@@ -1,4 +1,8 @@
-import discord from discord.ext import commands, tasks import asyncio import datetime import json import os import traceback
+import discord from discord.ext import commands
+tasks import asyncio
+import datetime
+import json import
+os import traceback
 
 # ------------------ CONFIG & DATA ------------------
 
