@@ -25,6 +25,36 @@ from datetime import datetime, timedelta
 from typing import Optional
 from discord import Embed, Colour
 
+# keep_alive_bot.py
+"""
+Headless keep-alive wrapper for Discord bot.
+Runs your bot anywhere with no open ports needed.
+"""
+
+import asyncio
+import os
+import subprocess
+import sys
+
+BOT_FILE = "bot.py"  # Your Discord bot file
+
+async def keep_alive():
+    print("Keep-alive loop started. Bot will auto-restart on crash.")
+    while True:
+        try:
+            # Start bot as subprocess
+            process = subprocess.Popen([sys.executable, BOT_FILE])
+            # Wait for it to finish
+            process.wait()
+            print(f"{BOT_FILE} exited. Restarting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"Error starting {BOT_FILE}: {e}")
+            await asyncio.sleep(5)
+
+# Run the keep-alive loop
+asyncio.run(keep_alive())
+
 # -----------------------------
 # Configuration & Data
 # -----------------------------
