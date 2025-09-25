@@ -1,0 +1,157 @@
+# Is/msmute.py
+from discord.ext import commands, tasks
+from discord import Embed, Colour
+from datetime import datetime, timedelta
+import asyncio
+import json
+import os
+
+# -----------------------------
+# Data file
+# -----------------------------
+DATA_FILE = "bot_data.json"
+if os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "r") as f:
+        DATA = json.load(f)
+else:
+    DATA = {
+        "users": {},
+        "mutes": {},
+        "rmute_usage": {},
+        "rdm_users": [],
+        "cache": {},
+        "mute_role_id": None,
+        "timetrack_channel_id": None,
+        "log_channel_id": None,
+        "staff_ping_role_id": None,
+        "higher_staff_ping_role_id": None,
+        "rcache_roles": []
+    }
+
+# -----------------------------
+# Helper to save DATA
+# -----------------------------
+async def persist():
+    with open(DATA_FILE, "w") as f:
+        json.dump(DATA, f, indent=4, default=str)
+
+# -----------------------------
+# Fancy embed helper
+# -----------------------------
+def fancy_embed(title, description, color=Colour.orange()):
+    embed = Embed(title=title, description=description, colour=color)
+    embed.timestamp = datetime.utcnow()
+    return embed
+
+# -----------------------------
+# Auto-unmute scheduler
+# -----------------------------
+async def schedule_unmute(bot, member_id, guild_id, delay):
+    await asyncio.sleep(delay)
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    member = guild.get_member(member_id)
+    role_id = DATA.get("mute_role_id")
+    if role_id and member:
+        role = guild.get_role(role_id)
+        if role in member.roles:
+            await member.remove_roles(role)
+    # Remove from DATA
+    DATA["mutes"].pop(str(member_id), None)
+    await persist()
+
+# -----------------------------
+# MSMute Cog
+# -----------------------------
+class MSMute(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # Schedule pending unmutes on startup
+        asyncio.create_task(self.schedule_pending_unmutes())
+
+    # -------------------------
+    # Schedule all pending unmutes
+    # -------------------------
+    async def schedule_pending_unmutes(self):
+        now = datetime.utcnow()
+        for uid, data in DATA.get("mutes", {}).items():
+            end = datetime.fromisoformat(data["end"])
+            delay = (end - now).total_seconds()
+            if delay > 0:
+                asyncio.create_task(schedule_unmute(self.bot, int(uid), data["guild_id"], delay))
+
+    # -------------------------
+    # MSMute command: multiple users
+    # -------------------------
+    @commands.command()
+    @commands.has_permissions(manage_roles=True)
+    async def msmute(self, ctx, duration: int, *, reason: str = "No reason provided"):
+        """Mute all mentioned users for a duration (in seconds) with a reason."""
+        role_id = DATA.get("mute_role_id")
+        if not role_id:
+            await ctx.send("❌ Mute role not set in config.")
+            return
+        role = ctx.guild.get_role(role_id)
+
+        if not ctx.message.mentions:
+            await ctx.send("❌ Please mention users to mute.")
+            return
+
+        for member in ctx.message.mentions:
+            await member.add_roles(role)
+            end_time = datetime.utcnow() + timedelta(seconds=duration)
+            DATA["mutes"][str(member.id)] = {
+                "end": end_time.isoformat(),
+                "reason": reason,
+                "guild_id": ctx.guild.id
+            }
+            # Track RMute usage
+            mod_id = str(ctx.author.id)
+            DATA["rmute_usage"][mod_id] = DATA["rmute_usage"].get(mod_id, 0) + 1
+            # Schedule unmute
+            asyncio.create_task(schedule_unmute(self.bot, member.id, ctx.guild.id, duration))
+        await persist()
+
+        mentions = ", ".join([m.mention for m in ctx.message.mentions])
+        await ctx.send(embed=fancy_embed("🔇 Users Muted",
+                                         f"{mentions} have been muted for {duration} seconds.\nReason: {reason}"))
+
+    # -------------------------
+    # MSUnmute command: single user
+    # -------------------------
+    @commands.command()
+    @commands.has_permissions(manage_roles=True)
+    async def msunmute(self, ctx, member: commands.MemberConverter):
+        role_id = DATA.get("mute_role_id")
+        if not role_id:
+            await ctx.send("❌ Mute role not set in config.")
+            return
+        role = ctx.guild.get_role(role_id)
+        if role in member.roles:
+            await member.remove_roles(role)
+        DATA["mutes"].pop(str(member.id), None)
+        await persist()
+        await ctx.send(embed=fancy_embed("🔈 User Unmuted", f"{member.mention} has been unmuted."))
+
+    # -------------------------
+    # RMute leaderboard
+    # -------------------------
+    @commands.command()
+    async def mrmlb(self, ctx):
+        if not DATA.get("rmute_usage"):
+            await ctx.send("No RMute usage data found.")
+            return
+        sorted_mods = sorted(DATA["rmute_usage"].items(), key=lambda x: x[1], reverse=True)[:10]
+        description = ""
+        for uid, count in sorted_mods:
+            member = ctx.guild.get_member(int(uid))
+            name = member.name if member else f"User {uid}"
+            description += f"**{name}** — {count} RMutes\n"
+        await ctx.send(embed=fancy_embed("📊 Top RMute Users", description))
+
+# -----------------------------
+# Cog setup function
+# -----------------------------
+def setup(bot):
+    bot.add_cog(MSMute(bot))
