@@ -3,3 +3,6 @@ aiohttp
 Flask==2.3.3
 tzdata
 pytz
+discord.py
+pillow
+requests
