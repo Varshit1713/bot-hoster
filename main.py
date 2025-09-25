@@ -712,8 +712,10 @@ async def on_ready():
 # End of Part 3
 # -----------------------------
 # -----------------------------
-# Part 4/4: Final Touches, Error Handling, Startup
+# Part 4/4 (Updated): Final Touches, Async Startup, Error Handling
 # -----------------------------
+
+import asyncio
 
 # -----------------------------
 # Error Handling
@@ -721,23 +723,16 @@ async def on_ready():
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send(f"❌ You do not have permission to run this command.")
+        await ctx.send("❌ You do not have permission to run this command.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(f"❌ Missing argument: {error.param.name}")
     elif isinstance(error, commands.BadArgument):
         await ctx.send(f"❌ Bad argument: {error}")
     elif isinstance(error, commands.CommandNotFound):
-        pass  # Ignore unknown commands
+        pass
     else:
         await ctx.send(f"❌ An unexpected error occurred: {error}")
         print(f"Error in command {ctx.command}: {error}")
-
-# -----------------------------
-# Helper: Load all members for caching
-# -----------------------------
-async def preload_members():
-    for guild in bot.guilds:
-        await guild.chunk()
 
 # -----------------------------
 # Graceful shutdown
@@ -748,9 +743,8 @@ async def shutdown():
     await bot.close()
 
 # -----------------------------
-# Keep-alive dummy server (if Render requires)
+# Keep-alive dummy server (for Render)
 # -----------------------------
-# Not using Flask/open ports
 async def keep_alive_server():
     while True:
         await asyncio.sleep(600)
@@ -778,50 +772,64 @@ async def mresetcache(ctx):
 # -----------------------------
 @bot.command()
 async def mshowconfig(ctx):
-    config_keys = ["mute_role_id","timetrack_channel_id","log_channel_id","staff_ping_role_id","higher_staff_ping_role_id","rcache_roles"]
+    config_keys = [
+        "mute_role_id",
+        "timetrack_channel_id",
+        "log_channel_id",
+        "staff_ping_role_id",
+        "higher_staff_ping_role_id",
+        "rcache_roles"
+    ]
     embed = Embed(title="Bot Configuration", colour=Colour.blue())
     for key in config_keys:
         embed.add_field(name=key, value=str(DATA.get(key, "Not set")), inline=False)
     await ctx.send(embed=embed)
 
 # -----------------------------
-# Startup Function
+# Preload all guild members
 # -----------------------------
-async def start_bot():
-    # Ensure directories exist
-    if not os.path.exists(DATA_FILE):
-        save_data(DEFAULTS)
-    # Preload members
+async def preload_members():
+    for guild in bot.guilds:
+        await guild.chunk()
+
+# -----------------------------
+# Async main startup function
+# -----------------------------
+async def main():
+    # Preload members for timetrack
     await preload_members()
+
     # Schedule pending unmutes
     await schedule_all_pending_unmutes()
-    # Start loops
+
+    # Start loops if not running
     if not timetrack_loop.is_running():
         timetrack_loop.start()
     if not keep_alive_loop.is_running():
         keep_alive_loop.start()
-    # Start keep-alive server
-    bot.loop.create_task(keep_alive_server())
-    print("Bot startup complete.")
 
-# -----------------------------
-# Run Bot
-# -----------------------------
-if __name__ == "__main__":
+    # Start keep-alive task
+    asyncio.create_task(keep_alive_server())
+
+    # Run the bot
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
-        print("Error: DISCORD_TOKEN environment variable not found.")
-        exit(1)
+        print("❌ DISCORD_TOKEN not found.")
+        return
     try:
-        bot.loop.create_task(start_bot())
-        bot.run(TOKEN)
+        await bot.start(TOKEN)
     except KeyboardInterrupt:
-        print("KeyboardInterrupt detected. Shutting down...")
-        bot.loop.run_until_complete(shutdown())
+        await shutdown()
     except Exception as e:
-        print(f"Unexpected error: {e}")
-        bot.loop.run_until_complete(shutdown())
+        print(f"❌ Unexpected error: {e}")
+        await shutdown()
 
 # -----------------------------
-# End of Part 4/4
+# Run async main
+# -----------------------------
+if __name__ == "__main__":
+    asyncio.run(main())
+
+# -----------------------------
+# End of Updated Part 4/4
 # -----------------------------
