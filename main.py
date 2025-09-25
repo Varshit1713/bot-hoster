@@ -1,69 +1,58 @@
-# This/main.py
+# main.py
+import discord
+from discord.ext import commands
 import os
 import asyncio
-import discord
-from discord.ext import commands, tasks
-from aiohttp import web
 
 # -----------------------------
-# Bot Initialization
+# Bot setup
 # -----------------------------
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!m", intents=intents)
-bot.remove_command("help")  # optional: use custom help
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -----------------------------
-# Load all cogs from Is/ folder
+# Load all cogs
 # -----------------------------
-cogs_dir = os.path.join(os.path.dirname(__file__), "Is")
-for filename in os.listdir(cogs_dir):
-    if filename.endswith(".py"):
-        bot.load_extension(f"Is.{filename[:-3]}")  # strip .py
+cogs = [
+    "Is.admin",
+    "Is.msmute",
+    "Is.timetrack",
+    "Is.cache",
+    "Is.ping",
+    "Is.dm_control"
+]
+
+for cog in cogs:
+    try:
+        bot.load_extension(cog)
+        print(f"✅ Loaded cog {cog}")
+    except Exception as e:
+        print(f"❌ Failed to load {cog}: {e}")
 
 # -----------------------------
-# Timetrack loop placeholder (actual implementation in timetrack.py)
+# On ready event
 # -----------------------------
-@tasks.loop(seconds=60)
-async def timetrack_loop():
-    # Placeholder loop. Real logic lives in timetrack.py cog
-    pass
+@bot.event
+async def on_ready():
+    print(f"Bot is online as {bot.user}")
 
 # -----------------------------
-# Start Render webserver (Example/webserver.py)
+# Keep-alive webserver
 # -----------------------------
 from Example import webserver
 
-async def start_render_webserver():
-    await webserver.start_webserver()
-    print("✅ Render webserver started")
+async def start_webserver():
+    await asyncio.to_thread(webserver.run)
 
 # -----------------------------
-# Async main function
+# Run bot
 # -----------------------------
 async def main():
     # Start webserver
-    asyncio.create_task(start_render_webserver())
+    asyncio.create_task(start_webserver())
+    # Run bot
+    await bot.start(os.environ["DISCORD_TOKEN"])
 
-    # Start timetrack loop
-    if not timetrack_loop.is_running():
-        timetrack_loop.start()
-
-    # Run Discord bot
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if not TOKEN:
-        print("❌ DISCORD_TOKEN not found.")
-        return
-
-    try:
-        await bot.start(TOKEN)
-    except KeyboardInterrupt:
-        await bot.close()
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        await bot.close()
-
-# -----------------------------
 # Entry point
-# -----------------------------
 if __name__ == "__main__":
     asyncio.run(main())
