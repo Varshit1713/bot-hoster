@@ -1,17 +1,18 @@
-# ultimate_m_bot.py
+# bot.py - Full Version Part 1/4
 """
-Fully-Functional Discord Bot
+Fully Functional Discord Bot
 Prefix: !m
 Features:
-- Timetrack system
+- Timetrack
 - RMute/Runmute with auto-unmute
 - Deleted message cache
 - Leaderboards
 - Staff ping
 - Purge logging
 - DM opt-out
-- Full customization via !mcustomize
+- Full customization (!mcustomize)
 - JSON persistence
+- Built-in keep-alive (no Flask, no open ports)
 """
 
 import discord
@@ -22,38 +23,8 @@ import json
 import os
 import re
 from datetime import datetime, timedelta
-from typing import Optional
 from discord import Embed, Colour
-
-# keep_alive_bot.py
-"""
-Headless keep-alive wrapper for Discord bot.
-Runs your bot anywhere with no open ports needed.
-"""
-
-import asyncio
-import os
-import subprocess
-import sys
-
-BOT_FILE = "bot.py"  # Your Discord bot file
-
-async def keep_alive():
-    print("Keep-alive loop started. Bot will auto-restart on crash.")
-    while True:
-        try:
-            # Start bot as subprocess
-            process = subprocess.Popen([sys.executable, BOT_FILE])
-            # Wait for it to finish
-            process.wait()
-            print(f"{BOT_FILE} exited. Restarting in 5 seconds...")
-            await asyncio.sleep(5)
-        except Exception as e:
-            print(f"Error starting {BOT_FILE}: {e}")
-            await asyncio.sleep(5)
-
-# Run the keep-alive loop
-asyncio.run(keep_alive())
+from typing import Optional
 
 # -----------------------------
 # Configuration & Data
@@ -341,124 +312,144 @@ async def on_message_delete(message: discord.Message):
         pass
 
 # -----------------------------
-# Commands
+# End of Part 1
+# -----------------------------
+# -----------------------------
+# Part 2/4: Commands - Mutes, Leaderboards, Cache, Staff Pings
 # -----------------------------
 
-# mcustomize
+# -----------------------------
+# !mcustomize - Configuration
+# -----------------------------
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def mcustomize(ctx, setting: str = None, value: str = None):
-    if not setting:
-        embed = Embed(title="!mcustomize Help", colour=Colour.blue())
-        embed.add_field(name="Usage", value="`!mcustomize [setting] [value]`", inline=False)
-        embed.add_field(name="Settings", value="`mute_role`, `timetrack_channel`, `log_channel`, `staff_ping_role`, `higher_staff_ping_role`, `rcache_roles`", inline=False)
-        await ctx.send(embed=embed)
+async def mcustomize(ctx, option: str = None, *, value: str = None):
+    """
+    Customize bot settings:
+    - mute_role_id, timetrack_channel_id, log_channel_id, staff_ping_role_id,
+      higher_staff_ping_role_id, rcache_roles
+    Example: !mcustomize mute_role_id 1234567890
+    """
+    if not option or not value:
+        await ctx.send("Usage: `!mcustomize [option] [value]`")
         return
-    setting = setting.lower()
-    if setting not in ["mute_role", "timetrack_channel", "log_channel", "staff_ping_role", "higher_staff_ping_role", "rcache_roles"]:
-        await ctx.send("Invalid setting name.")
-        return
-    if not value:
-        await ctx.send("Please provide a value for this setting.")
-        return
-    if setting == "rcache_roles":
-        DATA['rcache_roles'] = [int(x.strip()) for x in value.split(",")]
-    else:
-        DATA[f"{setting}_id"] = int(value)
-    await persist()
-    await ctx.send(f"Setting `{setting}` updated successfully.")
+    opt = option.lower()
+    try:
+        if opt in ["mute_role_id", "timetrack_channel_id", "log_channel_id", "staff_ping_role_id", "higher_staff_ping_role_id"]:
+            DATA[opt] = int(value)
+        elif opt == "rcache_roles":
+            DATA[opt] = [int(v) for v in value.split()]
+        else:
+            await ctx.send(f"Unknown option `{option}`.")
+            return
+        await persist()
+        await ctx.send(f"✅ `{opt}` updated successfully.")
+    except Exception as e:
+        await ctx.send(f"Error updating `{opt}`: {e}")
 
-# mrmute
+# -----------------------------
+# !mrmute - Multiple user mute
+# -----------------------------
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def mrmute(ctx, members: commands.Greedy[discord.Member], duration: str = None, *, reason: str = None):
     if not members:
-        await ctx.send("Please mention at least one user to mute.")
+        await ctx.send("Please mention at least one member to mute.")
         return
     seconds = parse_duration_to_seconds(duration) if duration else 0
     for member in members:
         try:
             await apply_mute(ctx.guild, member, ctx.author, seconds, reason or "No reason provided")
         except Exception as e:
-            await ctx.send(f"Failed to mute {member}: {e}")
-    await ctx.send(f"Muted {len(members)} members successfully.")
+            await ctx.send(f"Error muting {member}: {e}")
+    await ctx.send(f"✅ Muted {len(members)} member(s).")
 
-# mrunmute
+# -----------------------------
+# !mrunmute - Single user mute
+# -----------------------------
 @bot.command()
 @commands.has_permissions(manage_roles=True)
 async def mrunmute(ctx, member: discord.Member):
-    await remove_mute(ctx.guild, member, ctx.author)
-    await ctx.send(f"{member} has been unmuted.")
+    try:
+        await remove_mute(ctx.guild, member, by=ctx.author)
+        await ctx.send(f"✅ {member} has been unmuted.")
+    except Exception as e:
+        await ctx.send(f"Error unmuting {member}: {e}")
 
-# mrmlb
+# -----------------------------
+# !mrmlb - RMute usage leaderboard
+# -----------------------------
 @bot.command()
 async def mrmlb(ctx):
-    usage = DATA.get('rmute_usage', {})
-    sorted_usage = sorted(usage.items(), key=lambda x: x[1], reverse=True)[:10]
-    embed = Embed(title="RMute Leaderboard", colour=Colour.gold())
-    for uid, count in sorted_usage:
+    usage_sorted = sorted(DATA.get('rmute_usage', {}).items(), key=lambda x: x[1], reverse=True)[:10]
+    embed = Embed(title="Top RMute Users", colour=Colour.blue())
+    for uid, count in usage_sorted:
         member = ctx.guild.get_member(int(uid))
-        name = member.name if member else f"User {uid}"
-        embed.add_field(name=name, value=f"{count} rmutes", inline=False)
+        embed.add_field(name=str(member) if member else uid, value=f"Mutes: {count}", inline=False)
     await ctx.send(embed=embed)
 
-# mrcache
+# -----------------------------
+# !mrcache - Deleted messages/images
+# -----------------------------
 @bot.command()
-async def mrcache(ctx):
-    if not DATA['cache']:
-        await ctx.send("Cache is empty.")
+async def mrcache(ctx, limit: int = 5):
+    roles_ids = [r.id for r in ctx.author.roles]
+    allowed = any(rid in DATA.get('rcache_roles', []) for rid in roles_ids)
+    if not allowed:
+        await ctx.send("❌ You do not have permission to access the cache.")
         return
-    embed = Embed(title="Deleted Messages Cache", colour=Colour.red())
-    count = 0
-    for msg_id, rec in list(DATA['cache'].items())[-10:]:
-        author = rec.get('author', 'Unknown')
-        content = rec.get('content', '')
-        attachments = "\n".join(rec.get('attachments', [])) or "None"
-        reply_to = rec.get('reply_to', 'None')
-        embed.add_field(name=f"{author} (Deleted)", value=f"Content: {content}\nAttachments: {attachments}\nReply to: {reply_to}", inline=False)
-        count += 1
-    embed.set_footer(text=f"Showing last {count} deleted messages")
-    await ctx.send(embed=embed)
+    last_msgs = list(DATA.get('cache', {}).values())[-limit:]
+    for msg in last_msgs:
+        embed = Embed(title="Deleted Message", colour=Colour.red())
+        embed.add_field(name="Author", value=msg.get('author', 'Unknown'))
+        embed.add_field(name="Content", value=msg.get('content') or "None", inline=False)
+        embed.add_field(name="Channel ID", value=msg.get('channel_id'))
+        if msg.get('attachments'):
+            embed.add_field(name="Attachments", value="\n".join(msg['attachments']))
+        await ctx.send(embed=embed)
 
-# mtlb
+# -----------------------------
+# !mtlb - Timetrack leaderboard (filtered roles)
+# -----------------------------
 @bot.command()
-async def mtlb(ctx):
+async def mtlb(ctx, top: int = 10):
     rcache_roles = DATA.get('rcache_roles', [])
-    leaderboard = []
+    scores = []
     for uid, rec in DATA.get('users', {}).items():
         member = ctx.guild.get_member(int(uid))
         if not member:
             continue
         if rcache_roles and not any(r.id in rcache_roles for r in member.roles):
             continue
-        total = rec.get('total_online_seconds', 0)
-        leaderboard.append((member.name, total))
-    leaderboard.sort(key=lambda x: x[1], reverse=True)
+        total_sec = int(rec.get('total_online_seconds', 0))
+        scores.append((member, total_sec))
+    scores.sort(key=lambda x: x[1], reverse=True)
     embed = Embed(title="Timetrack Leaderboard", colour=Colour.green())
-    for name, total in leaderboard[:10]:
-        embed.add_field(name=name, value=format_timedelta(timedelta(seconds=total)), inline=False)
+    for member, sec in scores[:top]:
+        embed.add_field(name=str(member), value=format_timedelta(timedelta(seconds=sec)), inline=False)
     await ctx.send(embed=embed)
 
-# mtdm
+# -----------------------------
+# !mtdm - Timetrack leaderboard (no filter)
+# -----------------------------
 @bot.command()
-async def mtdm(ctx):
-    rcache_roles = DATA.get('rcache_roles', [])
-    leaderboard = []
+async def mtdm(ctx, top: int = 10):
+    scores = []
     for uid, rec in DATA.get('users', {}).items():
         member = ctx.guild.get_member(int(uid))
         if not member:
             continue
-        if rcache_roles and any(r.id in rcache_roles for r in member.roles):
-            continue
-        total = rec.get('total_online_seconds', 0)
-        leaderboard.append((member.name, total))
-    leaderboard.sort(key=lambda x: x[1], reverse=True)
-    embed = Embed(title="Non-RCACHE Users Leaderboard", colour=Colour.green())
-    for name, total in leaderboard[:10]:
-        embed.add_field(name=name, value=format_timedelta(timedelta(seconds=total)), inline=False)
+        total_sec = int(rec.get('total_online_seconds', 0))
+        scores.append((member, total_sec))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    embed = Embed(title="Timetrack Leaderboard (All Users)", colour=Colour.green())
+    for member, sec in scores[:top]:
+        embed.add_field(name=str(member), value=format_timedelta(timedelta(seconds=sec)), inline=False)
     await ctx.send(embed=embed)
 
-# mrping
+# -----------------------------
+# !mrping - Staff Ping
+# -----------------------------
 @bot.command()
 async def mrping(ctx):
     role_id = DATA.get('staff_ping_role_id')
@@ -467,11 +458,13 @@ async def mrping(ctx):
         return
     role = ctx.guild.get_role(int(role_id))
     if not role:
-        await ctx.send("Staff ping role not found.")
+        await ctx.send("Role not found in guild.")
         return
-    await ctx.send(role.mention)
+    await ctx.send(f"{role.mention}", delete_after=1)
 
-# mhsping
+# -----------------------------
+# !mhsping - Higher Staff Ping
+# -----------------------------
 @bot.command()
 async def mhsping(ctx):
     role_id = DATA.get('higher_staff_ping_role_id')
@@ -480,57 +473,355 @@ async def mhsping(ctx):
         return
     role = ctx.guild.get_role(int(role_id))
     if not role:
-        await ctx.send("Higher staff ping role not found.")
+        await ctx.send("Role not found in guild.")
         return
-    await ctx.send(role.mention)
+    await ctx.send(f"{role.mention}", delete_after=1)
 
-# mrdm
+# -----------------------------
+# !mrdm - DM opt-out
+# -----------------------------
 @bot.command()
 async def mrdm(ctx):
     uid = str(ctx.author.id)
     if uid in DATA.get('rdm_users', []):
         DATA['rdm_users'].remove(uid)
-        await ctx.send("You have opted back in to receive DMs from the bot.")
+        await ctx.send("✅ You have re-enabled DMs from the bot.")
     else:
         DATA['rdm_users'].append(uid)
-        await ctx.send("You have opted out from receiving DMs from the bot.")
+        await ctx.send("✅ You have opted out of DMs from the bot.")
     await persist()
 
-# mpurge
+# -----------------------------
+# !mpurge - Purge messages
+# -----------------------------
 @bot.command()
 @commands.has_permissions(manage_messages=True)
 async def mpurge(ctx, limit: int):
-    messages = await ctx.channel.purge(limit=limit)
+    if limit < 1:
+        await ctx.send("❌ Limit must be at least 1.")
+        return
+    deleted = await ctx.channel.purge(limit=limit)
+    embed = Embed(title="Messages Purged", colour=Colour.orange())
+    embed.add_field(name="Moderator", value=str(ctx.author), inline=False)
+    embed.add_field(name="Channel", value=str(ctx.channel), inline=False)
+    embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=False)
+    for msg in deleted[:5]:
+        embed.add_field(name=f"{msg.author}", value=msg.content or "No Content", inline=False)
     log_channel_id = DATA.get('log_channel_id')
     if log_channel_id:
         log_channel = ctx.guild.get_channel(int(log_channel_id))
         if log_channel:
-            embed = Embed(title=f"{ctx.author} purged messages", colour=Colour.dark_red())
-            for msg in messages[-10:]:
-                content = msg.content or "No text"
-                attachments = "\n".join([a.url for a in msg.attachments]) or "None"
-                embed.add_field(name=str(msg.author), value=f"{content}\nAttachments: {attachments}", inline=False)
             await log_channel.send(embed=embed)
-    await ctx.send(f"Purged {len(messages)} messages.", delete_after=5)
+    await ctx.send(f"✅ Purged {len(deleted)} messages.", delete_after=5)
 
-# mhelp
+# -----------------------------
+# !mhelp - Help command
+# -----------------------------
 @bot.command()
 async def mhelp(ctx):
     embed = Embed(title="Bot Commands", colour=Colour.blue())
-    embed.add_field(name="!mcustomize", value="Configure bot settings.", inline=False)
-    embed.add_field(name="!mrmute [users] [duration] [reason]", value="Mute users.", inline=False)
-    embed.add_field(name="!mrunmute [user]", value="Unmute a user.", inline=False)
-    embed.add_field(name="!mrmlb", value="Show RMute leaderboard.", inline=False)
-    embed.add_field(name="!mrcache", value="Show last deleted messages.", inline=False)
-    embed.add_field(name="!mtlb", value="Timetrack leaderboard (RCACHE_ROLES).", inline=False)
-    embed.add_field(name="!mtdm", value="Timetrack leaderboard (non-RCACHE).", inline=False)
-    embed.add_field(name="!mrping", value="Ping staff.", inline=False)
-    embed.add_field(name="!mhsping", value="Ping higher staff.", inline=False)
-    embed.add_field(name="!mrdm", value="Opt-in/out of bot DMs.", inline=False)
-    embed.add_field(name="!mpurge [number]", value="Purge messages.", inline=False)
+    embed.add_field(name="!mcustomize [option] [value]", value="Configure bot settings", inline=False)
+    embed.add_field(name="!mrmute [users] [duration] [reason]", value="Mute multiple users", inline=False)
+    embed.add_field(name="!mrunmute [user]", value="Unmute a single user", inline=False)
+    embed.add_field(name="!mrmlb", value="Top RMute users leaderboard", inline=False)
+    embed.add_field(name="!mrcache", value="View deleted messages/images", inline=False)
+    embed.add_field(name="!mtlb", value="Timetrack leaderboard (roles filtered)", inline=False)
+    embed.add_field(name="!mtdm", value="Timetrack leaderboard (all users)", inline=False)
+    embed.add_field(name="!mrping", value="Ping staff role", inline=False)
+    embed.add_field(name="!mhsping", value="Ping higher staff role", inline=False)
+    embed.add_field(name="!mrdm", value="Opt-out of bot DMs", inline=False)
+    embed.add_field(name="!mpurge [limit]", value="Purge messages in channel", inline=False)
     await ctx.send(embed=embed)
+
+# -----------------------------
+# End of Part 2
+# -----------------------------
+# -----------------------------
+# Part 3/4: Logging Events, Advanced Timetrack, Auto-Unmute Recovery
+# -----------------------------
+
+# -----------------------------
+# Channel/Role/Webhook Logging
+# -----------------------------
+async def log_action(guild: discord.Guild, title: str, description: str, color=Colour.red()):
+    channel_id = DATA.get('log_channel_id')
+    if not channel_id:
+        return
+    channel = guild.get_channel(int(channel_id))
+    if not channel:
+        return
+    embed = Embed(title=title, description=description, colour=color)
+    embed.timestamp = now_utc()
+    await channel.send(embed=embed)
+
+@bot.event
+async def on_guild_channel_create(channel):
+    await log_action(channel.guild, "Channel Created", f"Channel: {channel.name} ({channel.id}) created by bot or unknown", Colour.green())
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    await log_action(channel.guild, "Channel Deleted", f"Channel: {channel.name} ({channel.id}) deleted", Colour.red())
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    changes = []
+    if before.name != after.name:
+        changes.append(f"Name: `{before.name}` → `{after.name}`")
+    if changes:
+        await log_action(before.guild, "Channel Updated", "\n".join(changes), Colour.orange())
+
+@bot.event
+async def on_guild_role_create(role):
+    await log_action(role.guild, "Role Created", f"Role: {role.name} ({role.id}) created", Colour.green())
+
+@bot.event
+async def on_guild_role_delete(role):
+    await log_action(role.guild, "Role Deleted", f"Role: {role.name} ({role.id}) deleted", Colour.red())
+
+@bot.event
+async def on_guild_role_update(before, after):
+    changes = []
+    if before.name != after.name:
+        changes.append(f"Name: `{before.name}` → `{after.name}`")
+    if before.permissions != after.permissions:
+        changes.append(f"Permissions updated")
+    if changes:
+        await log_action(before.guild, "Role Updated", "\n".join(changes), Colour.orange())
+
+@bot.event
+async def on_webhook_update(channel):
+    await log_action(channel.guild, "Webhook Updated", f"Webhooks in channel {channel.name} ({channel.id}) updated", Colour.purple())
+
+# -----------------------------
+# Advanced Timetrack Session Calculation
+# -----------------------------
+async def calculate_session(member: discord.Member):
+    uid = str(member.id)
+    ensure_user_record(member.id)
+    rec = DATA['users'][uid]
+    if rec.get('online_start'):
+        try:
+            start = datetime.fromisoformat(rec['online_start'])
+            delta = now_utc() - start
+            rec['total_online_seconds'] += int(delta.total_seconds())
+            rec['online_start'] = str(now_utc())
+        except Exception:
+            rec['online_start'] = None
+    await persist()
+
+# -----------------------------
+# Auto-Unmute Recovery (on restart)
+# -----------------------------
+@bot.event
+async def on_connect():
+    await schedule_all_pending_unmutes()
+
+# -----------------------------
+# Reaction Listener (optional logging)
+# -----------------------------
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    await log_action(reaction.message.guild, "Reaction Added", f"{user} reacted {reaction.emoji} to message {reaction.message.id}", Colour.light_grey())
+
+@bot.event
+async def on_reaction_remove(reaction, user):
+    if user.bot:
+        return
+    await log_action(reaction.message.guild, "Reaction Removed", f"{user} removed reaction {reaction.emoji} from message {reaction.message.id}", Colour.light_grey())
+
+# -----------------------------
+# Member Update Logging
+# -----------------------------
+@bot.event
+async def on_member_update(before, after):
+    changes = []
+    if before.nick != after.nick:
+        changes.append(f"Nickname: `{before.nick}` → `{after.nick}`")
+    if before.roles != after.roles:
+        old = set(r.id for r in before.roles)
+        new = set(r.id for r in after.roles)
+        added = new - old
+        removed = old - new
+        if added:
+            changes.append(f"Roles Added: {', '.join([str(after.guild.get_role(r)) for r in added])}")
+        if removed:
+            changes.append(f"Roles Removed: {', '.join([str(after.guild.get_role(r)) for r in removed])}")
+    if changes:
+        await log_action(after.guild, f"Member Updated: {after}", "\n".join(changes), Colour.orange())
+
+# -----------------------------
+# Voice State Logging
+# -----------------------------
+@bot.event
+async def on_voice_state_update(member, before, after):
+    changes = []
+    if before.channel != after.channel:
+        if before.channel:
+            changes.append(f"Left voice channel: {before.channel.name}")
+        if after.channel:
+            changes.append(f"Joined voice channel: {after.channel.name}")
+    if changes:
+        await log_action(member.guild, f"Voice Update: {member}", "\n".join(changes), Colour.blurple())
+
+# -----------------------------
+# Message Edit Logging
+# -----------------------------
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot:
+        return
+    if before.content != after.content:
+        await log_action(before.guild, "Message Edited", f"Author: {before.author}\nChannel: {before.channel}\nBefore: {before.content}\nAfter: {after.content}", Colour.yellow())
+
+# -----------------------------
+# Fancy Embed for Mute/Unmute (Helper)
+# -----------------------------
+def fancy_embed(title: str, description: str, color=Colour.orange(), timestamp=True):
+    embed = Embed(title=title, description=description, colour=color)
+    if timestamp:
+        embed.timestamp = now_utc()
+    return embed
+
+# -----------------------------
+# Background Keep-Alive Loop
+# -----------------------------
+@tasks.loop(seconds=300)
+async def keep_alive_loop():
+    # Dummy loop to prevent Render from idling
+    for guild in bot.guilds:
+        for member in guild.members[:5]:
+            try:
+                await calculate_session(member)
+            except Exception:
+                continue
+
+# Start keep-alive loop
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user} (ID {bot.user.id})")
+    if not timetrack_loop.is_running():
+        timetrack_loop.start()
+    if not keep_alive_loop.is_running():
+        keep_alive_loop.start()
+    await schedule_all_pending_unmutes()
+    print("Bot fully ready and loops started.")
+
+# -----------------------------
+# End of Part 3
+# -----------------------------
+# -----------------------------
+# Part 4/4: Final Touches, Error Handling, Startup
+# -----------------------------
+
+# -----------------------------
+# Error Handling
+# -----------------------------
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send(f"❌ You do not have permission to run this command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ Missing argument: {error.param.name}")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send(f"❌ Bad argument: {error}")
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # Ignore unknown commands
+    else:
+        await ctx.send(f"❌ An unexpected error occurred: {error}")
+        print(f"Error in command {ctx.command}: {error}")
+
+# -----------------------------
+# Helper: Load all members for caching
+# -----------------------------
+async def preload_members():
+    for guild in bot.guilds:
+        await guild.chunk()
+
+# -----------------------------
+# Graceful shutdown
+# -----------------------------
+async def shutdown():
+    print("Shutting down bot...")
+    await persist()
+    await bot.close()
+
+# -----------------------------
+# Keep-alive dummy server (if Render requires)
+# -----------------------------
+# Not using Flask/open ports
+async def keep_alive_server():
+    while True:
+        await asyncio.sleep(600)
+        print(f"[Keep-alive] {datetime.utcnow()}")
+
+# -----------------------------
+# Utilities: Reset Timetrack / Cache
+# -----------------------------
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def mresettimetrack(ctx):
+    DATA['users'] = {}
+    await persist()
+    await ctx.send("✅ Timetrack data has been reset.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def mresetcache(ctx):
+    DATA['cache'] = {}
+    await persist()
+    await ctx.send("✅ Cache data has been reset.")
+
+# -----------------------------
+# Utilities: Show current configuration
+# -----------------------------
+@bot.command()
+async def mshowconfig(ctx):
+    config_keys = ["mute_role_id","timetrack_channel_id","log_channel_id","staff_ping_role_id","higher_staff_ping_role_id","rcache_roles"]
+    embed = Embed(title="Bot Configuration", colour=Colour.blue())
+    for key in config_keys:
+        embed.add_field(name=key, value=str(DATA.get(key, "Not set")), inline=False)
+    await ctx.send(embed=embed)
+
+# -----------------------------
+# Startup Function
+# -----------------------------
+async def start_bot():
+    # Ensure directories exist
+    if not os.path.exists(DATA_FILE):
+        save_data(DEFAULTS)
+    # Preload members
+    await preload_members()
+    # Schedule pending unmutes
+    await schedule_all_pending_unmutes()
+    # Start loops
+    if not timetrack_loop.is_running():
+        timetrack_loop.start()
+    if not keep_alive_loop.is_running():
+        keep_alive_loop.start()
+    # Start keep-alive server
+    bot.loop.create_task(keep_alive_server())
+    print("Bot startup complete.")
 
 # -----------------------------
 # Run Bot
 # -----------------------------
-bot.run(os.environ.get("DISCORD_TOKEN"))
+if __name__ == "__main__":
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if not TOKEN:
+        print("Error: DISCORD_TOKEN environment variable not found.")
+        exit(1)
+    try:
+        bot.loop.create_task(start_bot())
+        bot.run(TOKEN)
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt detected. Shutting down...")
+        bot.loop.run_until_complete(shutdown())
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        bot.loop.run_until_complete(shutdown())
+
+# -----------------------------
+# End of Part 4/4
+# -----------------------------
