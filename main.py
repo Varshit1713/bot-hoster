@@ -712,10 +712,13 @@ async def on_ready():
 # End of Part 3
 # -----------------------------
 # -----------------------------
-# Part 4/4 (Updated): Final Touches, Async Startup, Error Handling
+# Part 4/4: Final Async Startup + Render Web Server + Utilities
 # -----------------------------
 
+import os
 import asyncio
+from datetime import datetime
+from discord import Embed, Colour
 
 # -----------------------------
 # Error Handling
@@ -729,13 +732,13 @@ async def on_command_error(ctx, error):
     elif isinstance(error, commands.BadArgument):
         await ctx.send(f"❌ Bad argument: {error}")
     elif isinstance(error, commands.CommandNotFound):
-        pass
+        pass  # Ignore unknown commands
     else:
         await ctx.send(f"❌ An unexpected error occurred: {error}")
         print(f"Error in command {ctx.command}: {error}")
 
 # -----------------------------
-# Graceful shutdown
+# Graceful Shutdown
 # -----------------------------
 async def shutdown():
     print("Shutting down bot...")
@@ -743,15 +746,25 @@ async def shutdown():
     await bot.close()
 
 # -----------------------------
-# Keep-alive dummy server (for Render)
+# Keep-alive dummy server for Render
 # -----------------------------
-async def keep_alive_server():
-    while True:
-        await asyncio.sleep(600)
-        print(f"[Keep-alive] {datetime.utcnow()}")
+from aiohttp import web
+
+async def handle(request):
+    return web.Response(text="Bot is alive!")
+
+async def start_webserver():
+    port = int(os.environ.get("PORT", 8000))
+    app = web.Application()
+    app.add_routes([web.get("/", handle)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"✅ Webserver running on port {port}")
 
 # -----------------------------
-# Utilities: Reset Timetrack / Cache
+# Admin Utilities
 # -----------------------------
 @bot.command()
 @commands.has_permissions(administrator=True)
@@ -767,9 +780,6 @@ async def mresetcache(ctx):
     await persist()
     await ctx.send("✅ Cache data has been reset.")
 
-# -----------------------------
-# Utilities: Show current configuration
-# -----------------------------
 @bot.command()
 async def mshowconfig(ctx):
     config_keys = [
@@ -786,7 +796,7 @@ async def mshowconfig(ctx):
     await ctx.send(embed=embed)
 
 # -----------------------------
-# Preload all guild members
+# Preload members
 # -----------------------------
 async def preload_members():
     for guild in bot.guilds:
@@ -796,7 +806,10 @@ async def preload_members():
 # Async main startup function
 # -----------------------------
 async def main():
-    # Preload members for timetrack
+    # Start Render webserver for open port
+    asyncio.create_task(start_webserver())
+
+    # Preload members for timetrack accuracy
     await preload_members()
 
     # Schedule pending unmutes
@@ -808,10 +821,7 @@ async def main():
     if not keep_alive_loop.is_running():
         keep_alive_loop.start()
 
-    # Start keep-alive task
-    asyncio.create_task(keep_alive_server())
-
-    # Run the bot
+    # Run Discord bot
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if not TOKEN:
         print("❌ DISCORD_TOKEN not found.")
