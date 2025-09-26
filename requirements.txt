@@ -1,3 +1,4 @@
-discord.py
-flask
-playwright
+discord.py==2.4.1
+playwright==1.46.0
+flask==2.3.3
+aiohttp==3.8.5
