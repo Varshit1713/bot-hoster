@@ -8,7 +8,6 @@ import io
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
-# Hugging Face models for different styles
 MODELS = {
     "realistic": "stabilityai/stable-diffusion-2",
     "cartoon": "akhaliq/cartoon-diffusion",
@@ -26,12 +25,6 @@ async def on_ready():
 
 @bot.command()
 async def gen(ctx, style: str, *, prompt: str):
-    """
-    Generate an image with a chosen style.
-    Usage: !gen realistic A sunset over mountains
-           !gen cartoon Cute cat in a forest
-           !gen anime Magical girl flying
-    """
     style = style.lower()
     if style not in MODELS:
         await ctx.send(f"⚠️ Invalid style! Choose from: {', '.join(MODELS.keys())}")
