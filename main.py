@@ -5,8 +5,8 @@ import os
 import io
 
 # ---------------- CONFIG ----------------
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")         # Discord Bot Token
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Hugging Face API Token
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
 
 # Hugging Face models for different styles
 MODELS = {
