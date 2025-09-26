@@ -5,6 +5,22 @@ import discord
 from discord.ext import commands
 from playwright.async_api import async_playwright
 import tempfile
+from flask import Flask
+import threading
+
+# ---------- Flask server to keep Render happy ----------
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+# Run Flask in a separate thread so bot can run alongside
+threading.Thread(target=run_flask).start()
 
 # ---------- Discord Intents ----------
 intents = discord.Intents.default()
