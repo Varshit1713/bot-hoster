@@ -3,7 +3,7 @@ import os
 import io
 import threading
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 from flask import Flask
 from discord.ext import commands
 import discord
@@ -35,11 +35,11 @@ intents.messages = True
 intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- Fonts (fallback to default) ----------
+# ---------- Fonts ----------
 try:
-    FONT_REG = ImageFont.truetype("arial.ttf", 16)
-    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 16)
-    FONT_SMALL = ImageFont.truetype("arial.ttf", 13)
+    FONT_REG = ImageFont.truetype("arial.ttf", 18)
+    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 18)
+    FONT_SMALL = ImageFont.truetype("arial.ttf", 15)
 except Exception:
     FONT_REG = ImageFont.load_default()
     FONT_BOLD = ImageFont.load_default()
@@ -59,7 +59,7 @@ async def fetch_image(session: aiohttp.ClientSession, url: str, size: Optional[t
         LOG.exception("fetch_image failed for %s", url)
     return None
 
-def circle_avatar(img: Image.Image, size: int = 40) -> Image.Image:
+def circle_avatar(img: Image.Image, size: int = 48) -> Image.Image:
     mask = Image.new("L", (size, size), 0)
     dr = ImageDraw.Draw(mask)
     dr.ellipse((0,0,size,size), fill=255)
@@ -67,7 +67,7 @@ def circle_avatar(img: Image.Image, size: int = 40) -> Image.Image:
     out.paste(img.resize((size,size)), (0,0), mask)
     return out
 
-def wrap_text(draw: ImageDraw.Draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+def wrap_text(draw: ImageDraw.Draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list:
     if not text:
         return [""]
     words = text.split(" ")
@@ -88,174 +88,98 @@ def wrap_text(draw: ImageDraw.Draw, text: str, font: ImageFont.FreeTypeFont, max
 def truncate(text: str, max_len: int = 220) -> str:
     return text if len(text) <= max_len else text[:max_len-3] + "..."
 
-# ---------- Renderer (realistic) ----------
+# ---------- Renderer (realistic with bubbles, embeds, reactions) ----------
 async def messages_to_image(messages: List[discord.Message]) -> io.BytesIO:
-    WIDTH = 920
-    PADDING_X, PADDING_Y = 18, 12
+    WIDTH = 550
+    BG = (54, 57, 63)
+    TEXT_COLOR = (220, 221, 222)
+    TIMESTAMP_COLOR = (114, 118, 125)
     AVATAR_SIZE = 48
-    LINE_SPACING = 6
-    BG = (54,57,63)
-    TEXT_COLOR = (220,221,222)
-    NAME_DEFAULT = (114,137,218)
-    TS_COLOR = (150,150,150)
-    EMBED_BG = (47,49,54)
-    EMBED_TITLE = (0,162,255)
-    REACTION_BG = (60,63,70)
-    REACTION_TEXT = (220,221,222)
+    PADDING = 15
+    LINE_SPACING = 5
+    MAX_TEXT_WIDTH = WIDTH - (AVATAR_SIZE + 3*PADDING)
+    BUBBLE_COLOR = (64, 68, 75)
+    EMBED_BG = (47, 49, 54)
+    EMBED_TITLE_COLOR = (0, 162, 255)
+    REACTION_BG = (60, 63, 70)
+    REACTION_TEXT = (220, 221, 222)
 
+    # --- Preload avatars ---
     async with aiohttp.ClientSession() as session:
-        avatar_cache: Dict[int, Image.Image] = {}
-        attachments_map: Dict[int, List[Image.Image]] = {}
-        embeds_map: Dict[int, List[Dict[str, Any]]] = {}
-
-        # avatars, attachments, embeds
+        avatar_cache = {}
         for m in messages:
             uid = m.author.id
             if uid not in avatar_cache:
                 try:
                     url = str(m.author.display_avatar.url)
-                    aimg = await fetch_image(session, url, (AVATAR_SIZE, AVATAR_SIZE))
-                    avatar_cache[uid] = circle_avatar(aimg, AVATAR_SIZE) if aimg else Image.new("RGBA",(AVATAR_SIZE,AVATAR_SIZE),(100,100,100))
+                    avatar = await fetch_image(session, url, (AVATAR_SIZE, AVATAR_SIZE))
+                    avatar_cache[uid] = circle_avatar(avatar, AVATAR_SIZE) if avatar else Image.new("RGBA",(AVATAR_SIZE,AVATAR_SIZE),(100,100,100))
                 except Exception:
                     avatar_cache[uid] = Image.new("RGBA",(AVATAR_SIZE,AVATAR_SIZE),(100,100,100))
 
-            if m.attachments:
-                imgs = []
-                for att in m.attachments:
-                    if att.content_type and att.content_type.startswith("image/"):
-                        img = await fetch_image(session, att.url, (500, 400))
-                        if img: imgs.append(img)
-                if imgs:
-                    attachments_map[m.id] = imgs
-
-            if m.embeds:
-                ems = []
-                for e in m.embeds:
-                    emdict = {"title": e.title, "desc": truncate(e.description or ""), "url": e.url}
-                    if e.image:
-                        img = await fetch_image(session, e.image.url, (500, 300))
-                        emdict["image"] = img
-                    ems.append(emdict)
-                if ems:
-                    embeds_map[m.id] = ems
-
-    tmp = Image.new("RGB", (10,10))
-    draw_tmp = ImageDraw.Draw(tmp)
-    heights: List[int] = []
-    last_author: Optional[int] = None
-    for m in messages:
-        base_h = 0
-        if m.author.id != last_author:
-            base_h += FONT_BOLD.size + 6
-        lines = wrap_text(draw_tmp, m.content or "", FONT_REG, WIDTH - (PADDING_X*2 + AVATAR_SIZE + 20))
-        base_h += max(1, len(lines)) * (FONT_REG.size + LINE_SPACING)
-        if m.id in attachments_map:
-            for im in attachments_map[m.id]:
-                base_h += im.height + 8
-        if m.id in embeds_map:
-            for em in embeds_map[m.id]:
-                base_h += 70
-                if em.get("image"):
-                    base_h += em["image"].height + 8
-        if m.reactions:
-            base_h += 30
-        if m.reference and getattr(m.reference, "message_id", None):
-            base_h += 18
-        heights.append(base_h + PADDING_Y)
-        last_author = m.author.id
-
-    total_h = sum(heights) + PADDING_Y
-    canvas = Image.new("RGB", (WIDTH, max(total_h, 120)), BG)
-    draw = ImageDraw.Draw(canvas)
-
-    y = PADDING_Y
+    # --- Estimate canvas height ---
+    dummy = Image.new("RGB", (WIDTH, 100))
+    draw_tmp = ImageDraw.Draw(dummy)
+    est_height = PADDING
     last_author = None
     for m in messages:
-        avatar = avatar_cache.get(m.author.id, Image.new("RGBA",(AVATAR_SIZE,AVATAR_SIZE),(100,100,100)))
-        show_name = (m.author.id != last_author)
-        x_text = PADDING_X + AVATAR_SIZE + 12
+        if m.author.id != last_author:
+            est_height += FONT_BOLD.size + 4
+        lines = wrap_text(draw_tmp, truncate(m.content), FONT_REG, MAX_TEXT_WIDTH)
+        est_height += len(lines)*(FONT_REG.size + 2) + LINE_SPACING
+        last_author = m.author.id
+    est_height += PADDING
 
-        if m.reference and getattr(m.reference, "message_id", None):
-            reply_text = "Replying to message"
-            draw.rectangle([x_text-6, y-2, x_text+200, y+14], fill=(64,68,75))
-            draw.text((x_text, y), reply_text, font=FONT_SMALL, fill=(180,180,180))
-            y += FONT_SMALL.size + 6
+    # --- Draw canvas ---
+    img = Image.new("RGBA", (WIDTH, max(est_height, 200)), BG)
+    draw = ImageDraw.Draw(img)
 
-        if show_name:
-            canvas.paste(avatar, (PADDING_X, y), avatar)
-            name_color = NAME_DEFAULT
-            try:
-                if hasattr(m.author, "color") and m.author.color and m.author.color.value != 0:
-                    name_color = (m.author.color.r, m.author.color.g, m.author.color.b)
-            except Exception:
-                pass
-            draw.text((x_text, y), m.author.display_name, font=FONT_BOLD, fill=name_color)
-            ts = m.created_at.strftime("%H:%M")
-            if m.edited_at:
-                edit_label = " (edited)"
-                draw.text((x_text + draw.textlength(m.author.display_name, font=FONT_BOLD) + 8, y+1),
-                          ts + edit_label, font=FONT_SMALL, fill=TS_COLOR)
-            else:
-                draw.text((x_text + draw.textlength(m.author.display_name, font=FONT_BOLD) + 8, y+1),
-                          ts, font=FONT_SMALL, fill=TS_COLOR)
-            y += FONT_BOLD.size + 6
+    y = PADDING
+    last_author = None
+    for m in messages:
+        show_avatar = (m.author.id != last_author)
+        x_text = PADDING + (AVATAR_SIZE + PADDING if show_avatar else 0)
 
-        lines = wrap_text(draw, m.content or "", FONT_REG, WIDTH - (PADDING_X*2 + AVATAR_SIZE + 20))
-        for line in lines:
-            draw.text((x_text, y), line, font=FONT_REG, fill=TEXT_COLOR)
-            y += FONT_REG.size + LINE_SPACING
+        # avatar
+        if show_avatar:
+            avatar = avatar_cache.get(m.author.id)
+            if avatar:
+                img.paste(avatar, (PADDING, y), avatar)
 
-        if m.id in attachments_map:
-            for att_img in attachments_map[m.id]:
+        # username + timestamp
+        if show_avatar:
+            name_color = TEXT_COLOR
+            if hasattr(m.author, "color") and m.author.color.value != 0:
                 try:
-                    canvas.paste(att_img, (x_text, y), att_img if att_img.mode == "RGBA" else None)
+                    name_color = m.author.color.to_rgb()
                 except Exception:
-                    canvas.paste(att_img, (x_text, y))
-                y += att_img.height + 8
+                    pass
+            draw.text((x_text, y), m.author.display_name, font=FONT_BOLD, fill=name_color)
+            ts = m.created_at.strftime("%I:%M %p").lstrip("0")
+            ts_w = draw.textlength(ts, font=FONT_SMALL)
+            draw.text((WIDTH - PADDING - ts_w, y + 2), ts, font=FONT_SMALL, fill=TIMESTAMP_COLOR)
+            y += FONT_BOLD.size + 2
 
-        if m.id in embeds_map:
-            for em in embeds_map[m.id]:
-                box_w = WIDTH - (x_text + PADDING_X)
-                box_h = 70
-                draw.rectangle([x_text, y, x_text+box_w, y+box_h], fill=EMBED_BG)
-                if em.get("title"):
-                    draw.text((x_text+10, y+10), em["title"], font=FONT_BOLD, fill=EMBED_TITLE)
-                if em.get("desc"):
-                    desc_lines = wrap_text(draw, em["desc"], FONT_REG, box_w - 20)
-                    for i, dl in enumerate(desc_lines[:3]):
-                        draw.text((x_text+10, y+30 + i*(FONT_REG.size+2)), dl, font=FONT_REG, fill=TEXT_COLOR)
-                y += box_h + 6
-                if em.get("image"):
-                    try:
-                        canvas.paste(em["image"], (x_text, y), em["image"] if em["image"].mode == "RGBA" else None)
-                    except Exception:
-                        canvas.paste(em["image"], (x_text, y))
-                    y += em["image"].height + 8
+        # draw message bubble
+        lines = wrap_text(draw, truncate(m.content), FONT_REG, MAX_TEXT_WIDTH)
+        if lines:
+            bubble_height = len(lines)*(FONT_REG.size+2)+8
+            draw.rounded_rectangle([x_text-6, y-2, WIDTH-PADDING, y+bubble_height], radius=6, fill=BUBBLE_COLOR)
+            for line in lines:
+                draw.text((x_text, y), line, font=FONT_REG, fill=TEXT_COLOR)
+                y += FONT_REG.size + 2
+            y += LINE_SPACING
 
-        if m.reactions:
-            rx_x = x_text
-            rx_y = y
-            for reaction in m.reactions:
-                emoji_char = str(reaction.emoji)
-                count = reaction.count
-                ew = max(draw.textlength(emoji_char, font=FONT_REG), 14)
-                count_w = draw.textlength(str(count), font=FONT_REG)
-                pill_w = int(16 + ew + 6 + count_w)
-                draw.rounded_rectangle([rx_x, rx_y, rx_x + pill_w, rx_y + 24], radius=8, fill=REACTION_BG)
-                draw.text((rx_x + 8, rx_y + 4), emoji_char, font=FONT_REG, fill=REACTION_TEXT)
-                draw.text((rx_x + 8 + ew + 6, rx_y + 4), str(count), font=FONT_REG, fill=REACTION_TEXT)
-                rx_x += pill_w + 8
-            y += 32
-
-        y += PADDING_Y
         last_author = m.author.id
 
-    out = io.BytesIO()
-    canvas.save(out, format="PNG")
-    out.seek(0)
-    return out
+    # --- Crop final image ---
+    buf = io.BytesIO()
+    img = img.crop((0, 0, WIDTH, y + PADDING))
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
 
-# ---------- Commands ----------
+# ---------- Command ----------
 @bot.command(name="show")
 async def show_cmd(ctx: commands.Context, channel_id: Optional[int] = None, number: int = 10):
     try:
