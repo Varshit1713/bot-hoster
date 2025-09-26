@@ -1,195 +1,52 @@
-# main.py
-import os
-import io
 import discord
 from discord.ext import commands
-from playwright.async_api import async_playwright
-import tempfile
-from flask import Flask
-import threading
+import openai
+import io
+import requests
+import os
 
-# ---------- Flask server to keep Render happy ----------
-app = Flask("")
+# ---------- CONFIG ----------
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # Set in Render dashboard
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Set in Render dashboard
+# ----------------------------
 
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# Run Flask in a separate thread so bot can run alongside
-threading.Thread(target=run_flask).start()
-
-# ---------- Discord Intents ----------
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- HTML template for realistic mobile Discord ----------
-HTML_TEMPLATE = """
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-body {{
-  margin: 0;
-  padding: 20px;
-  font-family: "Arial", sans-serif;
-  background: #36393f;
-}}
-.chat-container {{
-  display: flex;
-  flex-direction: column;
-}}
-.message {{
-  display: flex;
-  margin-bottom: 12px;
-}}
-.avatar {{
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}}
-.content {{
-  display: flex;
-  flex-direction: column;
-  margin-left: 10px;
-  max-width: 300px;
-}}
-.username {{
-  font-weight: bold;
-  font-size: 14px;
-  color: #fff;
-  margin-bottom: 2px;
-}}
-.bubble {{
-  background: #40444b;
-  color: #dcddde;
-  font-size: 14px;
-  padding: 8px 12px;
-  border-radius: 16px;
-  word-wrap: break-word;
-  white-space: pre-wrap;
-}}
-.timestamp {{
-  font-size: 11px;
-  color: #72767d;
-  margin-top: 2px;
-  text-align: right;
-}}
-</style>
-</head>
-<body>
-<div class="chat-container">
-{messages_html}
-</div>
-</body>
-</html>
-"""
+openai.api_key = OPENAI_API_KEY
 
-def build_messages_html(messages):
-    html = ""
-    for m in messages:
-        html += f"""
-        <div class="message">
-            <img class="avatar" src="{m['avatar_url']}" />
-            <div class="content">
-                <div class="username">{m['username']}</div>
-                <div class="bubble">{m['message']}</div>
-                <div class="timestamp">{m['time']}</div>
-            </div>
-        </div>
-        """
-    return html
+@bot.event
+async def on_ready():
+    print(f"Bot is online as {bot.user}")
 
-async def render_image(messages):
-    html_content = HTML_TEMPLATE.format(messages_html=build_messages_html(messages))
-    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
-        f.write(html_content.encode("utf-8"))
-        temp_file = f.name
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto(f"file://{temp_file}")
-        await page.set_viewport_size({"width": 420, "height": 800})
-        buf = await page.screenshot(full_page=True)
-        await browser.close()
-    return buf
-
-# ---------- Helper: get Discord user info ----------
-async def get_user_info(ctx, username_input):
-    if username_input.startswith("<@") and username_input.endswith(">"):
-        user_id = int(username_input.replace("<@!", "").replace("<@", "").replace(">", ""))
-        member = ctx.guild.get_member(user_id)
-        if member:
-            username = member.display_name
-            avatar_url = member.display_avatar.url
-        else:
-            user = await bot.fetch_user(user_id)
-            username = user.name
-            avatar_url = user.avatar.url if user.avatar else "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png"
-    else:
-        username = username_input
-        avatar_url = "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png"
-    return username, avatar_url
-
-# ---------- !prank command ----------
-@bot.command(name="prank")
-async def prank(ctx, *, content: str):
+@bot.command()
+async def gen(ctx, *, description: str):
     """
-    Usage:
-    !prank <@user> message HH:MMam/pm
-    Multiple messages separated by ';'
-    Example:
-    !prank <@123> Hello 5:42am; John LOL 5:43am
+    Generate a realistic image based on the description.
+    Usage: !gen A sunset over a mountain lake
     """
+    embed = discord.Embed(title="Image Generation", description=f"Generating image for: `{description}` ⏳", color=0x00ff00)
+    message = await ctx.send(embed=embed)
+
     try:
-        messages_raw = content.split(";")
-        messages = []
+        # Request image generation from OpenAI
+        response = openai.Image.create(
+            prompt=description,
+            n=1,
+            size="1024x1024"  # High-resolution image
+        )
 
-        for raw in messages_raw:
-            raw = raw.strip()
-            if not raw:
-                continue
+        image_url = response['data'][0]['url']
 
-            import re
-            time_match = re.search(r'(\d{1,2}:\d{2}\s*(am|pm))$', raw, re.IGNORECASE)
-            if not time_match:
-                await ctx.send(f"Invalid time format in: {raw}")
-                return
-            msg_time_str = time_match.group(1)
+        # Fetch the image content
+        image_data = requests.get(image_url).content
+        image_file = discord.File(io.BytesIO(image_data), filename="generated.png")
 
-            msg_text_part = raw[:time_match.start()].strip()
-            parts = msg_text_part.split(" ", 1)
-            if len(parts) < 2:
-                await ctx.send(f"Invalid message format in: {raw}")
-                return
-            username_input, msg_text = parts[0].strip(), parts[1].strip()
-
-            username, avatar_url = await get_user_info(ctx, username_input)
-
-            messages.append({
-                "username": username,
-                "message": msg_text,
-                "time": msg_time_str,
-                "avatar_url": avatar_url
-            })
-
-        buf = await render_image(messages)
-        await ctx.send(file=discord.File(io.BytesIO(buf), "prank.png"))
+        # Send the image
+        await ctx.send(file=image_file)
+        await message.delete()  # Remove loading embed
 
     except Exception as e:
-        await ctx.send(f"Error: {e}")
+        await message.edit(content=f"⚠️ Error generating image: {e}")
 
-# ---------- Run ----------
-if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    if not TOKEN:
-        raise SystemExit("DISCORD_TOKEN not set")
-    bot.run(TOKEN)
+bot.run(TOKEN)
