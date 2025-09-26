@@ -20,7 +20,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# Start Flask in a separate thread
 threading.Thread(target=run_flask).start()
 
 # ---------- Discord bot setup ----------
@@ -188,7 +187,7 @@ async def prank(ctx, *, content: str):
     except Exception as e:
         await ctx.send(f"Error: {e}")
 
-# ---------- Run ----------
+# ---------- Run bot ----------
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
