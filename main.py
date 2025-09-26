@@ -1,13 +1,12 @@
 # main.py
 import os
-import sys
 import io
 import threading
 import logging
 import asyncio
 import base64
-import tempfile
 import subprocess
+import sys
 
 import discord
 from discord.ext import commands
@@ -21,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger("prank_bot")
 
 # -------------------------------
-# Flask keep-alive (open port)
+# Flask keep-alive
 # -------------------------------
 app = Flask("prank_bot")
 
@@ -31,7 +30,7 @@ def home():
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    LOG.info(f"Starting Flask keep-alive on port {port}")
+    LOG.info(f"Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port)
 
 threading.Thread(target=run_flask, daemon=True).start()
@@ -55,7 +54,6 @@ ensure_chromium()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # -------------------------------
