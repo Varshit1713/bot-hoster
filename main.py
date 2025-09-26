@@ -4,9 +4,9 @@ import requests
 import os
 import io
 
-# ---------- CONFIG ----------
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")
+# ---------------- CONFIG ----------------
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")         # Discord Bot Token
+HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # Hugging Face API Token
 
 # Hugging Face models for different styles
 MODELS = {
@@ -14,7 +14,7 @@ MODELS = {
     "cartoon": "akhaliq/cartoon-diffusion",
     "anime": "hakurei/waifu-diffusion"
 }
-# ----------------------------
+# ----------------------------------------
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
