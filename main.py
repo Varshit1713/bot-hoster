@@ -4,9 +4,10 @@ import io
 import threading
 import logging
 import random
+from datetime import datetime
 from flask import Flask
-from discord.ext import commands
 import discord
+from discord.ext import commands
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------- Logging ----------
@@ -26,7 +27,7 @@ def run_flask():
 def keep_alive():
     threading.Thread(target=run_flask, daemon=True).start()
 
-# ---------- Discord bot setup ----------
+# ---------- Discord bot ----------
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -43,8 +44,8 @@ except Exception:
 # ---------- Helpers ----------
 def circle_avatar(img, size=48):
     mask = Image.new("L", (size, size), 0)
-    dr = ImageDraw.Draw(mask)
-    dr.ellipse((0,0,size,size), fill=255)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0,0,size,size), fill=255)
     out = Image.new("RGBA", (size, size), (0,0,0,0))
     out.paste(img.resize((size,size)), (0,0), mask)
     return out
@@ -68,7 +69,26 @@ def wrap_text(draw, text, font, max_width):
     return lines
 
 # ---------- Prank image generator ----------
-def generate_prank_image(messages):
+async def fetch_avatar(bot, username):
+    # If username is a mention, try to fetch user
+    if username.startswith("<@") and username.endswith(">"):
+        user_id = int(username.replace("<@!", "").replace("<@", "").replace(">", ""))
+        try:
+            user = await bot.fetch_user(user_id)
+            avatar_bytes = await user.avatar.read()
+            img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+            return circle_avatar(img)
+        except:
+            pass
+    # Fallback: generate colored circle with initials
+    color = random.choice([(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255)])
+    img = Image.new("RGBA", (48,48), color)
+    draw = ImageDraw.Draw(img)
+    initials = "".join([x[0].upper() for x in username if x.isalnum()][:2])
+    draw.text((12,10), initials, font=FONT_BOLD, fill=(255,255,255))
+    return circle_avatar(img)
+
+async def generate_prank_image(bot, messages):
     WIDTH = 550
     BG = (54, 57, 63)
     TEXT_COLOR = (220, 221, 222)
@@ -79,16 +99,14 @@ def generate_prank_image(messages):
     BUBBLE_COLOR = (64, 68, 75)
     MAX_TEXT_WIDTH = WIDTH - (AVATAR_SIZE + 3*PADDING)
 
-    # Generate random avatars
+    # Generate avatars
     avatars = {}
     for m in messages:
         if m["username"] not in avatars:
-            color = random.choice([(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255)])
-            img = Image.new("RGBA", (AVATAR_SIZE, AVATAR_SIZE), color)
-            avatars[m["username"]] = circle_avatar(img, AVATAR_SIZE)
+            avatars[m["username"]] = await fetch_avatar(bot, m["username"])
 
     # Estimate height
-    dummy = Image.new("RGB", (WIDTH, 100))
+    dummy = Image.new("RGB", (WIDTH,100))
     draw_tmp = ImageDraw.Draw(dummy)
     est_height = PADDING
     last_author = None
@@ -106,19 +124,19 @@ def generate_prank_image(messages):
     y = PADDING
     last_author = None
     for m in messages:
-        show_avatar = (m["username"] != last_author)
-        x_text = PADDING + (AVATAR_SIZE + PADDING if show_avatar else 0)
+        show_avatar = True # Always show avatar for realism
+        x_text = PADDING + AVATAR_SIZE + PADDING
 
         if show_avatar:
             img.paste(avatars[m["username"]], (PADDING, y), avatars[m["username"]])
 
-        if show_avatar:
-            draw.text((x_text, y), m["username"], font=FONT_BOLD, fill=TEXT_COLOR)
-            ts_w = draw.textlength(m["time"], font=FONT_SMALL)
-            draw.text((WIDTH-PADDING-ts_w, y+2), m["time"], font=FONT_SMALL, fill=TIMESTAMP_COLOR)
-            y += FONT_BOLD.size + 2
+        # Username and timestamp
+        draw.text((x_text, y), m["username"], font=FONT_BOLD, fill=TEXT_COLOR)
+        ts_w = draw.textlength(m["time"], font=FONT_SMALL)
+        draw.text((WIDTH-PADDING-ts_w, y+2), m["time"], font=FONT_SMALL, fill=TIMESTAMP_COLOR)
+        y += FONT_BOLD.size + 4
 
-        # message bubble
+        # Message bubble
         lines = wrap_text(draw, m["message"], FONT_REG, MAX_TEXT_WIDTH)
         if lines:
             bubble_height = len(lines)*(FONT_REG.size+2)+8
@@ -129,6 +147,7 @@ def generate_prank_image(messages):
             y += LINE_SPACING
         last_author = m["username"]
 
+    # Crop close-up
     buf = io.BytesIO()
     img = img.crop((0,0,WIDTH, y+PADDING))
     img.save(buf, format="PNG")
@@ -140,8 +159,9 @@ def generate_prank_image(messages):
 async def prank(ctx, *, content: str):
     """
     Single or multi-message prank generator.
-    Single-message:
+    Single message:
       !prank John hello 2:52am
+      !prank <@USER_ID> hello 2:52am
     Multi-message:
       !prank John hello 2:52am; Jane hi 2:53am
     """
@@ -165,7 +185,7 @@ async def prank(ctx, *, content: str):
                 "time": msg_time
             })
 
-        buf = generate_prank_image(prank_messages)
+        buf = await generate_prank_image(bot, prank_messages)
         await ctx.send(file=discord.File(buf, "prank.png"))
 
     except Exception as e:
