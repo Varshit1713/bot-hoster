@@ -13,7 +13,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- HTML template ----------
+# ---------- HTML template for realistic mobile Discord ----------
 HTML_TEMPLATE = """
 <html>
 <head>
@@ -25,9 +25,13 @@ body {{
   font-family: "Arial", sans-serif;
   background: #36393f;
 }}
+.chat-container {{
+  display: flex;
+  flex-direction: column;
+}}
 .message {{
   display: flex;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }}
 .avatar {{
   width: 40px;
@@ -36,22 +40,25 @@ body {{
   flex-shrink: 0;
 }}
 .content {{
+  display: flex;
+  flex-direction: column;
   margin-left: 10px;
-  max-width: 350px;
+  max-width: 300px;
 }}
 .username {{
   font-weight: bold;
-  color: #fff;
   font-size: 14px;
+  color: #fff;
+  margin-bottom: 2px;
 }}
 .bubble {{
   background: #40444b;
-  border-radius: 16px;
-  padding: 6px 10px;
   color: #dcddde;
   font-size: 14px;
-  margin-top: 2px;
+  padding: 8px 12px;
+  border-radius: 16px;
   word-wrap: break-word;
+  white-space: pre-wrap;
 }}
 .timestamp {{
   font-size: 11px;
@@ -62,7 +69,9 @@ body {{
 </style>
 </head>
 <body>
+<div class="chat-container">
 {messages_html}
+</div>
 </body>
 </html>
 """
@@ -120,7 +129,7 @@ async def prank(ctx, *, content: str):
     """
     Usage:
     !prank <@user> message HH:MMam/pm
-    Multiple messages: separate with ';'
+    Multiple messages separated by ';'
     Example:
     !prank <@123> Hello 5:42am; John LOL 5:43am
     """
@@ -133,7 +142,6 @@ async def prank(ctx, *, content: str):
             if not raw:
                 continue
 
-            # Extract timestamp
             import re
             time_match = re.search(r'(\d{1,2}:\d{2}\s*(am|pm))$', raw, re.IGNORECASE)
             if not time_match:
@@ -141,7 +149,6 @@ async def prank(ctx, *, content: str):
                 return
             msg_time_str = time_match.group(1)
 
-            # Extract username and message
             msg_text_part = raw[:time_match.start()].strip()
             parts = msg_text_part.split(" ", 1)
             if len(parts) < 2:
