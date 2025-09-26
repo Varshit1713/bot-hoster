@@ -1,4 +1,3 @@
-# main.py
 import os
 import io
 import discord
@@ -141,51 +140,40 @@ async def get_user_info(ctx, username_input):
 # ---------- !prank command ----------
 @bot.command(name="prank")
 async def prank(ctx, *, content: str):
-    """
-    Usage:
-    !prank <@user> message HH:MMam/pm
-    Multiple messages separated by ';'
-    Example:
-    !prank <@123> Hello 5:42am; John LOL 5:43am
-    """
-    try:
-        messages_raw = content.split(";")
-        messages = []
+    messages_raw = content.split(";")
+    messages = []
 
-        for raw in messages_raw:
-            raw = raw.strip()
-            if not raw:
-                continue
+    for raw in messages_raw:
+        raw = raw.strip()
+        if not raw:
+            continue
 
-            # Extract time
-            time_match = re.search(r'(\d{1,2}:\d{2}\s*(am|pm))$', raw, re.IGNORECASE)
-            if not time_match:
-                await ctx.send(f"Invalid time format in: {raw}")
-                return
-            msg_time_str = time_match.group(1)
+        # Extract time
+        time_match = re.search(r'(\d{1,2}:\d{2}\s*(am|pm))$', raw, re.IGNORECASE)
+        if not time_match:
+            await ctx.send(f"Invalid time format in: {raw}")
+            return
+        msg_time_str = time_match.group(1)
 
-            # Extract username and message
-            msg_text_part = raw[:time_match.start()].strip()
-            parts = msg_text_part.split(" ", 1)
-            if len(parts) < 2:
-                await ctx.send(f"Invalid message format in: {raw}")
-                return
-            username_input, msg_text = parts[0].strip(), parts[1].strip()
+        # Extract username and message
+        msg_text_part = raw[:time_match.start()].strip()
+        parts = msg_text_part.split(" ", 1)
+        if len(parts) < 2:
+            await ctx.send(f"Invalid message format in: {raw}")
+            return
+        username_input, msg_text = parts[0].strip(), parts[1].strip()
 
-            username, avatar_url = await get_user_info(ctx, username_input)
+        username, avatar_url = await get_user_info(ctx, username_input)
 
-            messages.append({
-                "username": username,
-                "message": msg_text,
-                "time": msg_time_str,
-                "avatar_url": avatar_url
-            })
+        messages.append({
+            "username": username,
+            "message": msg_text,
+            "time": msg_time_str,
+            "avatar_url": avatar_url
+        })
 
-        buf = await render_image(messages)
-        await ctx.send(file=discord.File(io.BytesIO(buf), "prank.png"))
-
-    except Exception as e:
-        await ctx.send(f"Error: {e}")
+    buf = await render_image(messages)
+    await ctx.send(file=discord.File(io.BytesIO(buf), "prank.png"))
 
 # ---------- Run bot ----------
 if __name__ == "__main__":
