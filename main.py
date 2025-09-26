@@ -4,7 +4,6 @@ import io
 import threading
 import logging
 import random
-from datetime import datetime
 from flask import Flask
 import discord
 from discord.ext import commands
@@ -33,16 +32,16 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- Fonts ----------
 try:
-    FONT_REG = ImageFont.truetype("arial.ttf", 18)
-    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 18)
-    FONT_SMALL = ImageFont.truetype("arial.ttf", 15)
+    FONT_REG = ImageFont.truetype("arial.ttf", 16)
+    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 16)
+    FONT_SMALL = ImageFont.truetype("arial.ttf", 12)
 except Exception:
     FONT_REG = ImageFont.load_default()
     FONT_BOLD = ImageFont.load_default()
     FONT_SMALL = ImageFont.load_default()
 
 # ---------- Helpers ----------
-def circle_avatar(img, size=48):
+def circle_avatar(img, size=40):
     mask = Image.new("L", (size, size), 0)
     draw = ImageDraw.Draw(mask)
     draw.ellipse((0,0,size,size), fill=255)
@@ -51,8 +50,6 @@ def circle_avatar(img, size=48):
     return out
 
 def wrap_text(draw, text, font, max_width):
-    if not text:
-        return [""]
     words = text.split(" ")
     lines = []
     cur = ""
@@ -68,88 +65,92 @@ def wrap_text(draw, text, font, max_width):
         lines.append(cur)
     return lines
 
-# ---------- Prank image generator ----------
-async def fetch_avatar(bot, username):
-    # If username is a mention, try to fetch user
+async def fetch_avatar_and_name(ctx, username):
+    # Check if it's a mention
     if username.startswith("<@") and username.endswith(">"):
-        user_id = int(username.replace("<@!", "").replace("<@", "").replace(">", ""))
         try:
-            user = await bot.fetch_user(user_id)
-            avatar_bytes = await user.avatar.read()
+            user_id = int(username.replace("<@!", "").replace("<@", "").replace(">", ""))
+            member = ctx.guild.get_member(user_id)
+            if member is None:
+                member = await bot.fetch_user(user_id)
+            display_name = member.display_name if hasattr(member, "display_name") else member.name
+            avatar_bytes = await member.avatar.read()
             img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            return circle_avatar(img)
+            return display_name, circle_avatar(img, 40)
         except:
             pass
-    # Fallback: generate colored circle with initials
+    # Fallback: just use the username string with initials
     color = random.choice([(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255)])
-    img = Image.new("RGBA", (48,48), color)
+    img = Image.new("RGBA", (40,40), color)
     draw = ImageDraw.Draw(img)
     initials = "".join([x[0].upper() for x in username if x.isalnum()][:2])
-    draw.text((12,10), initials, font=FONT_BOLD, fill=(255,255,255))
-    return circle_avatar(img)
+    w,h = draw.textsize(initials, font=FONT_BOLD)
+    draw.text(((40-w)/2,(40-h)/2), initials, font=FONT_BOLD, fill=(255,255,255))
+    return username, circle_avatar(img, 40)
 
-async def generate_prank_image(bot, messages):
-    WIDTH = 550
+async def generate_mobile_prank(ctx, messages):
+    WIDTH = 420
     BG = (54, 57, 63)
     TEXT_COLOR = (220, 221, 222)
     TIMESTAMP_COLOR = (114, 118, 125)
-    AVATAR_SIZE = 48
-    PADDING = 15
-    LINE_SPACING = 5
+    AVATAR_SIZE = 40
+    PADDING = 10
+    LINE_SPACING = 4
     BUBBLE_COLOR = (64, 68, 75)
-    MAX_TEXT_WIDTH = WIDTH - (AVATAR_SIZE + 3*PADDING)
+    MAX_TEXT_WIDTH = WIDTH - AVATAR_SIZE - 4*PADDING
 
-    # Generate avatars
+    # Avatars and real usernames
     avatars = {}
+    display_names = {}
     for m in messages:
-        if m["username"] not in avatars:
-            avatars[m["username"]] = await fetch_avatar(bot, m["username"])
+        display_name, avatar = await fetch_avatar_and_name(ctx, m["username"])
+        avatars[m["username"]] = avatar
+        display_names[m["username"]] = display_name
 
     # Estimate height
     dummy = Image.new("RGB", (WIDTH,100))
     draw_tmp = ImageDraw.Draw(dummy)
     est_height = PADDING
-    last_author = None
     for m in messages:
-        if m["username"] != last_author:
-            est_height += FONT_BOLD.size + 4
+        est_height += FONT_BOLD.size + 2
         lines = wrap_text(draw_tmp, m["message"], FONT_REG, MAX_TEXT_WIDTH)
-        est_height += len(lines)*(FONT_REG.size+2) + LINE_SPACING
-        last_author = m["username"]
+        est_height += len(lines)*(FONT_REG.size+2) + FONT_SMALL.size + LINE_SPACING*2
+        est_height += PADDING
     est_height += PADDING
 
     # Draw canvas
-    img = Image.new("RGBA", (WIDTH, max(est_height,200)), BG)
+    img = Image.new("RGBA", (WIDTH, est_height), BG)
     draw = ImageDraw.Draw(img)
     y = PADDING
-    last_author = None
     for m in messages:
-        show_avatar = True # Always show avatar for realism
-        x_text = PADDING + AVATAR_SIZE + PADDING
+        x_avatar = PADDING
+        x_text = x_avatar + AVATAR_SIZE + PADDING
 
-        if show_avatar:
-            img.paste(avatars[m["username"]], (PADDING, y), avatars[m["username"]])
+        # Avatar
+        img.paste(avatars[m["username"]], (x_avatar, y), avatars[m["username"]])
 
-        # Username and timestamp
-        draw.text((x_text, y), m["username"], font=FONT_BOLD, fill=TEXT_COLOR)
-        ts_w = draw.textlength(m["time"], font=FONT_SMALL)
-        draw.text((WIDTH-PADDING-ts_w, y+2), m["time"], font=FONT_SMALL, fill=TIMESTAMP_COLOR)
-        y += FONT_BOLD.size + 4
+        # Username
+        draw.text((x_text, y), display_names[m["username"]], font=FONT_BOLD, fill=TEXT_COLOR)
+        y += FONT_BOLD.size + 2
 
         # Message bubble
         lines = wrap_text(draw, m["message"], FONT_REG, MAX_TEXT_WIDTH)
-        if lines:
-            bubble_height = len(lines)*(FONT_REG.size+2)+8
-            draw.rounded_rectangle([x_text-6, y-2, WIDTH-PADDING, y+bubble_height+y-2], radius=6, fill=BUBBLE_COLOR)
-            for line in lines:
-                draw.text((x_text, y), line, font=FONT_REG, fill=TEXT_COLOR)
-                y += FONT_REG.size + 2
-            y += LINE_SPACING
-        last_author = m["username"]
+        bubble_height = len(lines)*(FONT_REG.size+2) + FONT_SMALL.size + 8
+        draw.rounded_rectangle([x_text-6, y-4, WIDTH-PADDING, y+bubble_height], radius=10, fill=BUBBLE_COLOR)
 
-    # Crop close-up
+        line_y = y
+        for line in lines:
+            draw.text((x_text, line_y), line, font=FONT_REG, fill=TEXT_COLOR)
+            line_y += FONT_REG.size + 2
+
+        # Timestamp below bubble
+        ts_w = draw.textlength(m["time"], font=FONT_SMALL)
+        draw.text((x_text + (WIDTH-x_text-PADDING-ts_w), line_y), m["time"], font=FONT_SMALL, fill=TIMESTAMP_COLOR)
+
+        y += bubble_height + LINE_SPACING
+
     buf = io.BytesIO()
-    img = img.crop((0,0,WIDTH, y+PADDING))
+    img = img.crop((0,0,WIDTH,y+PADDING))
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
@@ -157,14 +158,6 @@ async def generate_prank_image(bot, messages):
 # ---------- !prank command ----------
 @bot.command(name="prank")
 async def prank(ctx, *, content: str):
-    """
-    Single or multi-message prank generator.
-    Single message:
-      !prank John hello 2:52am
-      !prank <@USER_ID> hello 2:52am
-    Multi-message:
-      !prank John hello 2:52am; Jane hi 2:53am
-    """
     try:
         messages_raw = content.split(";")
         prank_messages = []
@@ -185,7 +178,7 @@ async def prank(ctx, *, content: str):
                 "time": msg_time
             })
 
-        buf = await generate_prank_image(bot, prank_messages)
+        buf = await generate_mobile_prank(ctx, prank_messages)
         await ctx.send(file=discord.File(buf, "prank.png"))
 
     except Exception as e:
