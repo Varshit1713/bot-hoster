@@ -1,7 +1,36 @@
+# main.py
+import os
 import io
+import threading
+import logging
 import random
 import datetime
+from flask import Flask
+from discord.ext import commands
+import discord
 from PIL import Image, ImageDraw, ImageFont
+import aiohttp
+
+# ---------- Logging ----------
+logging.basicConfig(level=logging.INFO)
+LOG = logging.getLogger("discord_bot")
+
+# ---------- Keep-alive ----------
+app = Flask(__name__)
+@app.route("/")
+def home():
+    return "Bot alive!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
+
+def keep_alive():
+    threading.Thread(target=run_flask, daemon=True).start()
+
+# ---------- Discord bot setup ----------
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- Fonts ----------
 try:
@@ -17,9 +46,9 @@ except Exception:
 def circle_avatar(img, size=48):
     mask = Image.new("L", (size, size), 0)
     dr = ImageDraw.Draw(mask)
-    dr.ellipse((0, 0, size, size), fill=255)
-    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    out.paste(img.resize((size, size)), (0, 0), mask)
+    dr.ellipse((0,0,size,size), fill=255)
+    out = Image.new("RGBA", (size, size), (0,0,0,0))
+    out.paste(img.resize((size,size)), (0,0), mask)
     return out
 
 def wrap_text(draw, text, font, max_width):
@@ -40,15 +69,8 @@ def wrap_text(draw, text, font, max_width):
         lines.append(cur)
     return lines
 
-# ---------- Prank Image Generator ----------
+# ---------- Prank image generator ----------
 def generate_prank_image(messages):
-    """
-    messages: list of dicts:
-    [
-        {"username": "John", "message": "Hello!", "time": "5:42am"},
-        {"username": "Jane", "message": "Hi John", "time": "5:43am"}
-    ]
-    """
     WIDTH = 550
     BG = (54, 57, 63)
     TEXT_COLOR = (220, 221, 222)
@@ -59,7 +81,7 @@ def generate_prank_image(messages):
     BUBBLE_COLOR = (64, 68, 75)
     MAX_TEXT_WIDTH = WIDTH - (AVATAR_SIZE + 3*PADDING)
 
-    # Generate random avatars for each user
+    # generate avatars
     avatars = {}
     for m in messages:
         if m["username"] not in avatars:
@@ -67,7 +89,7 @@ def generate_prank_image(messages):
             img = Image.new("RGBA", (AVATAR_SIZE, AVATAR_SIZE), color)
             avatars[m["username"]] = circle_avatar(img, AVATAR_SIZE)
 
-    # Estimate height
+    # estimate height
     dummy = Image.new("RGB", (WIDTH, 100))
     draw_tmp = ImageDraw.Draw(dummy)
     est_height = PADDING
@@ -80,8 +102,8 @@ def generate_prank_image(messages):
         last_author = m["username"]
     est_height += PADDING
 
-    # Create canvas
-    img = Image.new("RGBA", (WIDTH, max(est_height, 200)), BG)
+    # draw canvas
+    img = Image.new("RGBA", (WIDTH, max(est_height,200)), BG)
     draw = ImageDraw.Draw(img)
     y = PADDING
     last_author = None
@@ -89,11 +111,9 @@ def generate_prank_image(messages):
         show_avatar = (m["username"] != last_author)
         x_text = PADDING + (AVATAR_SIZE + PADDING if show_avatar else 0)
 
-        # avatar
         if show_avatar:
             img.paste(avatars[m["username"]], (PADDING, y), avatars[m["username"]])
 
-        # username + timestamp
         if show_avatar:
             draw.text((x_text, y), m["username"], font=FONT_BOLD, fill=TEXT_COLOR)
             ts_w = draw.textlength(m["time"], font=FONT_SMALL)
@@ -109,24 +129,53 @@ def generate_prank_image(messages):
                 draw.text((x_text, y), line, font=FONT_REG, fill=TEXT_COLOR)
                 y += FONT_REG.size + 2
             y += LINE_SPACING
-
         last_author = m["username"]
 
-    # Crop and return
     buf = io.BytesIO()
-    img = img.crop((0, 0, WIDTH, y+PADDING))
+    img = img.crop((0,0,WIDTH, y+PADDING))
     img.save(buf, format="PNG")
     buf.seek(0)
     return buf
 
-# ---------- Example usage ----------
+# ---------- !prank command ----------
+@bot.command(name="prank")
+async def prank(ctx, *, content: str):
+    """
+    Multi-message prank generator.
+    Usage:
+    !prank John|Hey 5:42am; Jane|OMG 5:44am; John|LOL 5:45am
+    """
+    try:
+        messages_raw = content.split(";")
+        prank_messages = []
+        for raw in messages_raw:
+            raw = raw.strip()
+            if not raw:
+                continue
+            if "|" not in raw:
+                await ctx.send(f"Invalid format in segment: {raw}")
+                return
+            username_part, rest = raw.split("|",1)
+            rest = rest.strip()
+            if " " not in rest:
+                await ctx.send(f"Missing time in segment: {raw}")
+                return
+            msg_text, msg_time = rest.rsplit(" ",1)
+            prank_messages.append({
+                "username": username_part.strip(),
+                "message": msg_text.strip(),
+                "time": msg_time.strip()
+            })
+        buf = generate_prank_image(prank_messages)
+        await ctx.send(file=discord.File(buf, "prank.png"))
+    except Exception as e:
+        LOG.exception("Error in prank command")
+        await ctx.send(f"An error occurred: {e}")
+
+# ---------- Main ----------
 if __name__ == "__main__":
-    # Example messages
-    messages = [
-        {"username": "JohnDoe", "message": "Hey, this is a prank!", "time": "5:42am"},
-        {"username": "Jane", "message": "What???", "time": "5:43am"},
-        {"username": "JohnDoe", "message": "LOL got you!", "time": "5:44am"}
-    ]
-    buf = generate_prank_image(messages)
-    with open("prank_test.png", "wb") as f:
-        f.write(buf.getvalue())
+    keep_alive()
+    TOKEN = os.getenv("DISCORD_TOKEN")
+    if not TOKEN:
+        raise SystemExit("DISCORD_TOKEN not set")
+    bot.run(TOKEN)
