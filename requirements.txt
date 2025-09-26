@@ -1,7 +1,3 @@
-discord.py==2.6.0
-aiohttp
-Flask==2.3.3
-tzdata
-pytz
-pillow
-requests
+discord.py
+playwright
+flask
