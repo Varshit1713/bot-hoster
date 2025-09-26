@@ -4,12 +4,10 @@ import io
 import threading
 import logging
 import random
-import datetime
 from flask import Flask
 from discord.ext import commands
 import discord
 from PIL import Image, ImageDraw, ImageFont
-import aiohttp
 
 # ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
@@ -81,7 +79,7 @@ def generate_prank_image(messages):
     BUBBLE_COLOR = (64, 68, 75)
     MAX_TEXT_WIDTH = WIDTH - (AVATAR_SIZE + 3*PADDING)
 
-    # generate avatars
+    # Generate random avatars
     avatars = {}
     for m in messages:
         if m["username"] not in avatars:
@@ -89,7 +87,7 @@ def generate_prank_image(messages):
             img = Image.new("RGBA", (AVATAR_SIZE, AVATAR_SIZE), color)
             avatars[m["username"]] = circle_avatar(img, AVATAR_SIZE)
 
-    # estimate height
+    # Estimate height
     dummy = Image.new("RGB", (WIDTH, 100))
     draw_tmp = ImageDraw.Draw(dummy)
     est_height = PADDING
@@ -102,7 +100,7 @@ def generate_prank_image(messages):
         last_author = m["username"]
     est_height += PADDING
 
-    # draw canvas
+    # Draw canvas
     img = Image.new("RGBA", (WIDTH, max(est_height,200)), BG)
     draw = ImageDraw.Draw(img)
     y = PADDING
@@ -141,9 +139,11 @@ def generate_prank_image(messages):
 @bot.command(name="prank")
 async def prank(ctx, *, content: str):
     """
-    Multi-message prank generator.
-    Usage:
-    !prank John|Hey 5:42am; Jane|OMG 5:44am; John|LOL 5:45am
+    Single or multi-message prank generator.
+    Single-message:
+      !prank John hello 2:52am
+    Multi-message:
+      !prank John hello 2:52am; Jane hi 2:53am
     """
     try:
         messages_raw = content.split(";")
@@ -152,22 +152,22 @@ async def prank(ctx, *, content: str):
             raw = raw.strip()
             if not raw:
                 continue
-            if "|" not in raw:
-                await ctx.send(f"Invalid format in segment: {raw}")
+            parts = raw.split(" ")
+            if len(parts) < 2:
+                await ctx.send(f"Invalid format: {raw}")
                 return
-            username_part, rest = raw.split("|",1)
-            rest = rest.strip()
-            if " " not in rest:
-                await ctx.send(f"Missing time in segment: {raw}")
-                return
-            msg_text, msg_time = rest.rsplit(" ",1)
+            msg_time = parts[-1].strip()
+            msg_text = " ".join(parts[1:-1]).strip()
+            username = parts[0].strip()
             prank_messages.append({
-                "username": username_part.strip(),
-                "message": msg_text.strip(),
-                "time": msg_time.strip()
+                "username": username,
+                "message": msg_text,
+                "time": msg_time
             })
+
         buf = generate_prank_image(prank_messages)
         await ctx.send(file=discord.File(buf, "prank.png"))
+
     except Exception as e:
         LOG.exception("Error in prank command")
         await ctx.send(f"An error occurred: {e}")
