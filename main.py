@@ -1,193 +1,196 @@
 # main.py
 import os
 import io
-import threading
-import logging
-import random
-from flask import Flask
-import discord
+import asyncio
+import re
+from datetime import datetime, timedelta
 from discord.ext import commands
-from PIL import Image, ImageDraw, ImageFont
+from playwright.async_api import async_playwright
+import tempfile
 
-# ---------- Logging ----------
-logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger("discord_bot")
+bot = commands.Bot(command_prefix="!")
 
-# ---------- Keep-alive ----------
-app = Flask(__name__)
-@app.route("/")
-def home():
-    return "Bot alive!"
+# ---------- HTML template ----------
+HTML_TEMPLATE = """
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{
+  margin: 0;
+  padding: 20px;
+  font-family: "Arial", sans-serif;
+  background: #36393f;
+}}
+.message {{
+  display: flex;
+  margin-bottom: 10px;
+}}
+.avatar {{
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}}
+.content {{
+  margin-left: 10px;
+  max-width: 350px;
+}}
+.username {{
+  font-weight: bold;
+  color: #fff;
+  font-size: 14px;
+}}
+.bubble {{
+  background: #40444b;
+  border-radius: 16px;
+  padding: 6px 10px;
+  color: #dcddde;
+  font-size: 14px;
+  margin-top: 2px;
+  word-wrap: break-word;
+}}
+.timestamp {{
+  font-size: 11px;
+  color: #72767d;
+  margin-top: 2px;
+  text-align: right;
+}}
+</style>
+</head>
+<body>
+{messages_html}
+</body>
+</html>
+"""
 
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    threading.Thread(target=run_flask, daemon=True).start()
-
-# ---------- Discord bot ----------
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# ---------- Fonts ----------
-try:
-    FONT_REG = ImageFont.truetype("arial.ttf", 16)
-    FONT_BOLD = ImageFont.truetype("arialbd.ttf", 16)
-    FONT_SMALL = ImageFont.truetype("arial.ttf", 12)
-except Exception:
-    FONT_REG = ImageFont.load_default()
-    FONT_BOLD = ImageFont.load_default()
-    FONT_SMALL = ImageFont.load_default()
-
-# ---------- Helpers ----------
-def circle_avatar(img, size=40):
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((0,0,size,size), fill=255)
-    out = Image.new("RGBA", (size, size), (0,0,0,0))
-    out.paste(img.resize((size,size)), (0,0), mask)
-    return out
-
-def wrap_text(draw, text, font, max_width):
-    words = text.split(" ")
-    lines = []
-    cur = ""
-    for word in words:
-        test = (cur + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_width:
-            cur = test
-        else:
-            if cur:
-                lines.append(cur)
-            cur = word
-    if cur:
-        lines.append(cur)
-    return lines
-
-async def fetch_avatar_and_name(ctx, username):
-    # Check if it's a mention
-    if username.startswith("<@") and username.endswith(">"):
-        try:
-            user_id = int(username.replace("<@!", "").replace("<@", "").replace(">", ""))
-            member = ctx.guild.get_member(user_id)
-            if member is None:
-                member = await bot.fetch_user(user_id)
-            display_name = member.display_name if hasattr(member, "display_name") else member.name
-            avatar_bytes = await member.avatar.read()
-            img = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
-            return display_name, circle_avatar(img, 40)
-        except:
-            pass
-    # Fallback: just use the username string with initials
-    color = random.choice([(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255),(0,255,255)])
-    img = Image.new("RGBA", (40,40), color)
-    draw = ImageDraw.Draw(img)
-    initials = "".join([x[0].upper() for x in username if x.isalnum()][:2])
-    w,h = draw.textsize(initials, font=FONT_BOLD)
-    draw.text(((40-w)/2,(40-h)/2), initials, font=FONT_BOLD, fill=(255,255,255))
-    return username, circle_avatar(img, 40)
-
-async def generate_mobile_prank(ctx, messages):
-    WIDTH = 420
-    BG = (54, 57, 63)
-    TEXT_COLOR = (220, 221, 222)
-    TIMESTAMP_COLOR = (114, 118, 125)
-    AVATAR_SIZE = 40
-    PADDING = 10
-    LINE_SPACING = 4
-    BUBBLE_COLOR = (64, 68, 75)
-    MAX_TEXT_WIDTH = WIDTH - AVATAR_SIZE - 4*PADDING
-
-    # Avatars and real usernames
-    avatars = {}
-    display_names = {}
+def build_messages_html(messages):
+    html = ""
     for m in messages:
-        display_name, avatar = await fetch_avatar_and_name(ctx, m["username"])
-        avatars[m["username"]] = avatar
-        display_names[m["username"]] = display_name
+        html += f"""
+        <div class="message">
+            <img class="avatar" src="{m['avatar_url']}" />
+            <div class="content">
+                <div class="username">{m['username']}</div>
+                <div class="bubble">{m['message']}</div>
+                <div class="timestamp">{m['time']}</div>
+            </div>
+        </div>
+        """
+    return html
 
-    # Estimate height
-    dummy = Image.new("RGB", (WIDTH,100))
-    draw_tmp = ImageDraw.Draw(dummy)
-    est_height = PADDING
-    for m in messages:
-        est_height += FONT_BOLD.size + 2
-        lines = wrap_text(draw_tmp, m["message"], FONT_REG, MAX_TEXT_WIDTH)
-        est_height += len(lines)*(FONT_REG.size+2) + FONT_SMALL.size + LINE_SPACING*2
-        est_height += PADDING
-    est_height += PADDING
+async def render_image(messages):
+    html_content = HTML_TEMPLATE.format(messages_html=build_messages_html(messages))
+    with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as f:
+        f.write(html_content.encode("utf-8"))
+        temp_file = f.name
 
-    # Draw canvas
-    img = Image.new("RGBA", (WIDTH, est_height), BG)
-    draw = ImageDraw.Draw(img)
-    y = PADDING
-    for m in messages:
-        x_avatar = PADDING
-        x_text = x_avatar + AVATAR_SIZE + PADDING
-
-        # Avatar
-        img.paste(avatars[m["username"]], (x_avatar, y), avatars[m["username"]])
-
-        # Username
-        draw.text((x_text, y), display_names[m["username"]], font=FONT_BOLD, fill=TEXT_COLOR)
-        y += FONT_BOLD.size + 2
-
-        # Message bubble
-        lines = wrap_text(draw, m["message"], FONT_REG, MAX_TEXT_WIDTH)
-        bubble_height = len(lines)*(FONT_REG.size+2) + FONT_SMALL.size + 8
-        draw.rounded_rectangle([x_text-6, y-4, WIDTH-PADDING, y+bubble_height], radius=10, fill=BUBBLE_COLOR)
-
-        line_y = y
-        for line in lines:
-            draw.text((x_text, line_y), line, font=FONT_REG, fill=TEXT_COLOR)
-            line_y += FONT_REG.size + 2
-
-        # Timestamp below bubble
-        ts_w = draw.textlength(m["time"], font=FONT_SMALL)
-        draw.text((x_text + (WIDTH-x_text-PADDING-ts_w), line_y), m["time"], font=FONT_SMALL, fill=TIMESTAMP_COLOR)
-
-        y += bubble_height + LINE_SPACING
-
-    buf = io.BytesIO()
-    img = img.crop((0,0,WIDTH,y+PADDING))
-    img.save(buf, format="PNG")
-    buf.seek(0)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.goto(f"file://{temp_file}")
+        await page.set_viewport_size({"width": 420, "height": 800})
+        buf = await page.screenshot(full_page=True)
+        await browser.close()
     return buf
+
+# ---------- Helper: get Discord user info ----------
+async def get_user_info(ctx, username_input):
+    if username_input.startswith("<@") and username_input.endswith(">"):
+        user_id = int(username_input.replace("<@!", "").replace("<@", "").replace(">", ""))
+        member = ctx.guild.get_member(user_id)
+        if member:
+            username = member.display_name
+            avatar_url = member.display_avatar.url
+        else:
+            user = await bot.fetch_user(user_id)
+            username = user.name
+            avatar_url = user.avatar.url if user.avatar else "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png"
+    else:
+        username = username_input
+        avatar_url = "https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png"
+    return username, avatar_url
+
+# ---------- Scheduler ----------
+scheduled_messages = []
+
+async def check_scheduled():
+    while True:
+        now = datetime.now()
+        ready = [m for m in scheduled_messages if m['send_time'] <= now]
+        if ready:
+            # Render all ready messages in a single screenshot
+            messages_to_send = ready
+            ctx = ready[0]['ctx']  # use ctx of first message
+            buf = await render_image([m['data'] for m in messages_to_send])
+            await ctx.send(file=commands.File(io.BytesIO(buf), "prank.png"))
+            # Remove sent messages
+            for m in ready:
+                scheduled_messages.remove(m)
+        await asyncio.sleep(5)
+
+# Start scheduler task
+@bot.event
+async def on_ready():
+    print(f"Bot logged in as {bot.user}")
+    bot.loop.create_task(check_scheduled())
 
 # ---------- !prank command ----------
 @bot.command(name="prank")
 async def prank(ctx, *, content: str):
+    """
+    Usage:
+    !prank <@user> message HH:MMam/pm
+    Multiple messages: separate with ';'
+    Example:
+    !prank <@123> Hello 5:42am; <@456> LOL 5:43am
+    """
     try:
         messages_raw = content.split(";")
-        prank_messages = []
+        now = datetime.now()
+
         for raw in messages_raw:
             raw = raw.strip()
             if not raw:
                 continue
-            parts = raw.split(" ")
-            if len(parts) < 2:
-                await ctx.send(f"Invalid format: {raw}")
+            # Extract time
+            time_match = re.search(r'(\d{1,2}:\d{2}\s*(am|pm))$', raw, re.IGNORECASE)
+            if not time_match:
+                await ctx.send(f"Invalid time format in: {raw}")
                 return
-            msg_time = parts[-1].strip()
-            msg_text = " ".join(parts[1:-1]).strip()
-            username = parts[0].strip()
-            prank_messages.append({
-                "username": username,
-                "message": msg_text,
-                "time": msg_time
+            msg_time_str = time_match.group(1)
+            msg_text_part = raw[:time_match.start()].strip()
+            parts = msg_text_part.split(" ", 1)
+            if len(parts) < 2:
+                await ctx.send(f"Invalid message format in: {raw}")
+                return
+            username_input, msg_text = parts[0].strip(), parts[1].strip()
+            username, avatar_url = await get_user_info(ctx, username_input)
+
+            # Calculate send time
+            msg_datetime = datetime.strptime(msg_time_str.lower(), "%I:%M%p")
+            msg_datetime = msg_datetime.replace(year=now.year, month=now.month, day=now.day)
+            if msg_datetime < now:
+                msg_datetime += timedelta(days=1)
+
+            scheduled_messages.append({
+                'ctx': ctx,
+                'send_time': msg_datetime,
+                'data': {
+                    "username": username,
+                    "message": msg_text,
+                    "time": msg_time_str,
+                    "avatar_url": avatar_url
+                }
             })
 
-        buf = await generate_mobile_prank(ctx, prank_messages)
-        await ctx.send(file=discord.File(buf, "prank.png"))
+        await ctx.send(f"Prank scheduled with {len(messages_raw)} message(s)! They will appear in a single screenshot.")
 
     except Exception as e:
-        LOG.exception("Error in prank command")
-        await ctx.send(f"An error occurred: {e}")
+        await ctx.send(f"Error: {e}")
 
-# ---------- Main ----------
+# ---------- Run ----------
 if __name__ == "__main__":
-    keep_alive()
     TOKEN = os.getenv("DISCORD_TOKEN")
     if not TOKEN:
         raise SystemExit("DISCORD_TOKEN not set")
