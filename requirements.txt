@@ -1,5 +1,5 @@
-discord.py==2.6.3
-playwright==1.46.0
-flask==2.3.3
-aiohttp==3.8.4
-# greenlet is NOT pinned; playwright will install 3.0.3 automatically
+discord.py>=2.3.0
+aiohttp>=3.8.5
+beautifulsoup4>=4.12.2
+lxml>=4.9.3
+playwright>=1.46.0
