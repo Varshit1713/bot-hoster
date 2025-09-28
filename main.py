@@ -1,148 +1,142 @@
-import os
-import io
-import asyncio
-import base64
-import logging
-import threading
-import subprocess
-import sys
+# discord_copytext_bot.py
+# Simple Discord bot that fetches a URL and returns visible text.
+# Usage in Discord:  !copytext https://example.com
+# Optionally:       !copytext https://example.com redact
 
+import os
+import re
+import aiohttp
+import asyncio
+from bs4 import BeautifulSoup
 import discord
 from discord.ext import commands
-from flask import Flask
-import aiohttp
 
-# -------------------------------
-# Logging
-# -------------------------------
-logging.basicConfig(level=logging.INFO)
-LOG = logging.getLogger("prank_bot")
+# --------- CONFIG ----------
+COMMAND_PREFIX = "!"
+MAX_EMBED_FIELD = 1900   # safe limit for embed fields
+MAX_INLINE_TEXT = 1800   # fallback for in-message text
+REDACT_DANGEROUS = False  # set True to enable redaction by default
+# ---------------------------
 
-# -------------------------------
-# Flask keep-alive
-# -------------------------------
-app = Flask("prank_bot")
-
-@app.route("/")
-def home():
-    return "Bot is running!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 8080))
-    LOG.info(f"Starting Flask on port {port}")
-    app.run(host="0.0.0.0", port=port)
-
-threading.Thread(target=run_flask, daemon=True).start()
-
-# -------------------------------
-# Ensure Playwright Chromium
-# -------------------------------
-def ensure_chromium():
-    try:
-        LOG.info("Installing Playwright Chromium if missing...")
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-        LOG.info("Playwright Chromium ready.")
-    except Exception as e:
-        LOG.exception("Failed to install Chromium: %s", e)
-
-ensure_chromium()
-
-# -------------------------------
-# Bot setup
-# -------------------------------
 intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 
-# -------------------------------
-# HTML template for mobile style
-# -------------------------------
-HTML_TEMPLATE = """
-<html>
-<head>
-<style>
-body {{ background:#36393f; font-family: Arial, sans-serif; color:#dcddde; margin:0; padding:18px; width:375px; }}
-.message {{ display:flex; gap:10px; margin-bottom:12px; align-items:flex-start; }}
-.avatar {{ width:42px; height:42px; border-radius:50%; background-size:cover; flex-shrink:0; }}
-.content {{ max-width:300px; }}
-.username {{ font-weight:700; color:#fff; font-size:15px; margin-bottom:4px; display:inline-block; }}
-.time {{ color:#72767d; font-size:12px; margin-left:8px; display:inline-block; vertical-align:top; }}
-.bubble {{ background:#40444b; padding:8px 12px; border-radius:14px; font-size:15px; white-space:pre-wrap; }}
-</style>
-</head>
-<body>
-<div class="chat">
-<div class="message">
-<div class="avatar" style="background-image:url('{avatar}');"></div>
-<div class="content">
-<div><span class="username">{username}</span><span class="time">{time}</span></div>
-<div class="bubble">{message}</div>
-</div>
-</div>
-</div>
-</body>
-</html>
-"""
+# Optional redaction patterns (enable by setting REDACT_DANGEROUS True or using 'redact' arg)
+DANGEROUS_PATTERNS = [
+    r'loadstring\s*\([^)]*\)',
+    r'game\s*:\s*HttpGet\s*\([^)]*\)',
+    r'HttpGet\s*\([^)]*\)',
+    r'HttpPost\s*\([^)]*\)',
+    r'\beval\s*\([^)]*\)',
+    r'\bexec\s*\([^)]*\)',
+    r'fetch\s*\([^)]*\)',
+    r'new\s+Function\s*\([^)]*\)',
+]
+REDACT_RE = re.compile("|".join(f'({p})' for p in DANGEROUS_PATTERNS), flags=re.IGNORECASE)
+def redact(text: str) -> str:
+    return REDACT_RE.sub("[REDACTED_EXECUTION_CODE]", text)
 
-# -------------------------------
-# Helper: download avatar to data URI
-# -------------------------------
-async def avatar_to_data_uri(url):
-    fallback = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII="
+async def fetch_page(session: aiohttp.ClientSession, url: str, timeout: int = 25):
+    """
+    Fetches the URL following redirects, returns (final_url, html, status)
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; CopyTextBot/1.0)"}
+    async with session.get(url, headers=headers, allow_redirects=True, timeout=timeout) as resp:
+        final = str(resp.url)
+        txt = await resp.text(errors="ignore")
+        return final, txt, resp.status
+
+def extract_visible_text(html: str) -> str:
+    """
+    Extract visible text from HTML using BeautifulSoup.
+    Removes scripts/styles and returns cleaned text.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # remove script/style/meta/noscript
+    for tag in soup(["script", "style", "noscript", "meta", "iframe", "svg"]):
+        tag.decompose()
+
+    # If the page uses <article>, prefer that
+    article = soup.find("article")
+    if article:
+        text = article.get_text(separator="\n", strip=True)
+    else:
+        text = soup.get_text(separator="\n", strip=True)
+
+    # collapse multiple blank lines
+    text = re.sub(r'\n{2,}', '\n\n', text)
+    return text.strip()
+
+@bot.command(name="copytext", help="Fetch a URL and copy visible text. Usage: !copytext <url> [redact]")
+async def copytext(ctx, url: str, mode: str = ""):
+    """
+    Example commands:
+      !copytext https://example.com
+      !copytext https://example.com redact
+    """
+    # validation
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await ctx.reply("Please include http:// or https:// in the URL.", mention_author=False)
+        return
+
+    do_redact = REDACT_DANGEROUS or (mode.lower() == "redact")
+
+    await ctx.trigger_typing()
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    b64 = base64.b64encode(data).decode()
-                    return f"data:image/png;base64,{b64}"
-    except Exception:
-        LOG.exception("Failed to fetch avatar %s", url)
-    return fallback
-
-# -------------------------------
-# !prank command
-# -------------------------------
-@bot.command()
-async def prank(ctx, user: discord.User, *, content):
-    LOG.info(f"Command triggered by {ctx.author} -> target: {user}, content: {content}")
-    await ctx.send("✅ Command received! Rendering...")
-
-    # Split last word as time
-    *msg_parts, time_str = content.split()
-    message_text = " ".join(msg_parts)
-    if not time_str.lower().endswith(("am","pm")):
-        time_str = "12:00pm"
-
-    # Fetch avatar
-    avatar_uri = await avatar_to_data_uri(str(user.display_avatar.url))
-
-    # Prepare HTML
-    html = HTML_TEMPLATE.format(username=user.name, message=message_text, time=time_str, avatar=avatar_uri)
-
-    # Render with Playwright
-    try:
-        from playwright.async_api import async_playwright
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-            page = await browser.new_page(viewport={"width": 375, "height": 800})
-            await page.set_content(html)
-            await asyncio.sleep(0.05)
-            buf = await page.screenshot(full_page=True)
-            await browser.close()
-        await ctx.send(file=discord.File(io.BytesIO(buf), filename="prank.png"))
+        async with aiohttp.ClientSession() as sess:
+            final_url, html, status = await fetch_page(sess, url)
     except Exception as e:
-        LOG.exception("Rendering failed: %s", e)
-        await ctx.send(f"❌ Rendering failed: {e}")
+        await ctx.reply(f"Failed to fetch URL: {e}", mention_author=False)
+        return
 
-# -------------------------------
-# Run bot
-# -------------------------------
+    text = extract_visible_text(html)
+    if do_redact:
+        text = redact(text)
+
+    # If nothing interesting
+    if not text:
+        await ctx.reply(f"No visible text found (HTTP {status}) for: {final_url}", mention_author=False)
+        return
+
+    # If short, reply directly (but keep under Discord message limits)
+    if len(text) <= MAX_INLINE_TEXT:
+        reply = f"**Resolved:** {final_url}\n**HTTP:** {status}\n\n```\n{text}\n```"
+        await ctx.reply(reply, mention_author=False)
+        return
+
+    # If longer, send as a file
+    filename = "page_text.txt"
+    path = f"/tmp/{filename}"
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"Source: {final_url}\nHTTP: {status}\n\n")
+            f.write(text)
+        # send file
+        await ctx.reply("Text is long — uploading as file:", file=discord.File(path))
+    except Exception as e:
+        # fallback: send truncated embed fields
+        truncated = text[:MAX_EMBED_FIELD] + "\n\n...[truncated]"
+        embed = discord.Embed(title="Resolved text (truncated)", description=f"Source: {final_url}\nHTTP: {status}")
+        embed.add_field(name="Text (truncated)", value=f"```text\n{truncated}\n```", inline=False)
+        await ctx.reply(embed=embed, mention_author=False)
+    finally:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+@bot.command(name="helpme")
+async def helpme(ctx):
+    txt = ("Simple `copytext` bot.\n"
+           "`!copytext <url>` — fetch and return visible text from the page.\n"
+           "`!copytext <url> redact` — same but redact common loader/execution patterns.\n\n"
+           "Use responsibly. Do not scan sites you don't have permission to access.")
+    await ctx.reply(txt, mention_author=False)
+
 if __name__ == "__main__":
-    TOKEN = os.getenv("DISCORD_TOKEN")
-    if not TOKEN:
-        LOG.error("DISCORD_TOKEN not set in environment!")
-        raise SystemExit("DISCORD_TOKEN missing")
-    LOG.info("Starting bot...")
-    bot.run(TOKEN)
+    TOKEN = os.getenv("DISCORD_BOT_TOKEN") or "REPLACE_WITH_YOUR_TOKEN"
+    if TOKEN == "REPLACE_WITH_YOUR_TOKEN":
+        print("Set your bot token in DISCORD_BOT_TOKEN environment variable or edit the script.")
+    else:
+        bot.run(TOKEN)
