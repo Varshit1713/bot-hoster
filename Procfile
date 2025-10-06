@@ -1,1 +1,1 @@
-web: python antiscam_bot.py
+web: python3 main.py
