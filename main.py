@@ -7,10 +7,10 @@ import requests
 app = Flask(ॐ KARMA •HN•)
 
 # Environment variables
-DISCORD_BOT_TOKEN = os.getenv("MTQyNjI0NTM5NzA3NjI0NjU5MQ.GUWBid.aQwNbmXM2RvcSAh1qZp536__2MXw-jYgnbH8l0")
+DISCORD_BOT_TOKEN = os.getenv("MTQyNjI0NTM5NzA3NjI0NjU5MQ.GV0iWL.CzsEgRGGj8SLdpGkeTJPprVYTq-MxXTqDhSlOs")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "1410458084874260592")
 AUTH_SECRET = os.getenv("AUTH_SECRET")  # Optional security
-BOT_DISPLAY_NAME = os.getenv("BOT_DISPLAY_NAME", "CommandLoggerBot")
+BOT_DISPLAY_NAME = os.getenv("ॐ KARMA •HN•", "CommandLoggerBot")
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 
@@ -29,7 +29,7 @@ def make_embed(payload):
     username = payload.get("username", "Unknown user")
     user_id = payload.get("user_id", "unknown")
     description = payload.get("description", "No description provided.")
-    bot_name = payload.get("bot_name", "Unknown Bot")
+    bot_name = payload.get("ॐ KARMA •HN•", "Unknown Bot")
     extra = payload.get("extra", {})
 
     # Build fields
@@ -46,23 +46,23 @@ def make_embed(payload):
             val = str(v)
             if len(val) > 1024:
                 val = val[:1020] + "…"
-            fields.append({"name": k, "value": val, "inline": False})
+            fields.append({"ॐ KARMA •HN•": k, "value": val, "inline": False})
 
     embed = {
-        "title": "Command Triggered",
+        "title": "KARMA",
         "description": "A command or trigger was used in the server.",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "color": 0x2F3136,
-        "author": {"name": bot_name},
+        "author": {"name": ॐ KARMA •HN•},
         "fields": fields,
-        "footer": {"text": f"{BOT_DISPLAY_NAME} • logged"},
+        "footer": {"text": f"{ॐ KARMA •HN•} • logged"},
     }
     return embed
 
 def send_embed(channel_id, embed):
     url = f"{DISCORD_API_BASE}/channels/{channel_id}/messages"
     headers = {
-        "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+        "Authorization": f"Bot {MTQyNjI0NTM5NzA3NjI0NjU5MQ.GV0iWL.CzsEgRGGj8SLdpGkeTJPprVYTq-MxXTqDhSlOs}",
         "Content-Type": "application/json"
     }
     payload = {"embeds": [embed]}
