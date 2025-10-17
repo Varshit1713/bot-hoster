@@ -4,10 +4,10 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 import requests
 
-app = Flask(__name__)
+app = Flask(ॐ KARMA •HN•)
 
 # Environment variables
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_BOT_TOKEN = os.getenv("MTQyNjI0NTM5NzA3NjI0NjU5MQ.GUWBid.aQwNbmXM2RvcSAh1qZp536__2MXw-jYgnbH8l0")
 LOG_CHANNEL_ID = os.getenv("LOG_CHANNEL_ID", "1410458084874260592")
 AUTH_SECRET = os.getenv("AUTH_SECRET")  # Optional security
 BOT_DISPLAY_NAME = os.getenv("BOT_DISPLAY_NAME", "CommandLoggerBot")
