@@ -15,7 +15,7 @@ BOT_DISPLAY_NAME = os.getenv("ॐ KARMA •HN•", "CommandLoggerBot")
 DISCORD_API_BASE = "https://discord.com/api/v10"
 
 if not DISCORD_BOT_TOKEN:
-    raise ValueError("DISCORD_BOT_TOKEN environment variable is required!")
+    raise ValueError("MTQyNjI0NTM5NzA3NjI0NjU5MQ.GV0iWL.CzsEgRGGj8SLdpGkeTJPprVYTq-MxXTqDhSlOs")
 
 def auth_ok(req):
     """Validate optional auth header."""
